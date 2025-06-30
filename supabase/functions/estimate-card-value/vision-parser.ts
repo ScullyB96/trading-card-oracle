@@ -10,330 +10,261 @@ export interface ExtractedCardInfo {
   rawText: string;
 }
 
-export async function extractCardInfoFromImage(base64Image: string): Promise<ExtractedCardInfo> {
-  const googleApiKey = Deno.env.get('Google API Key');
-  
-  if (!googleApiKey) {
-    throw new Error('Google Vision API key not configured');
-  }
+const GOOGLE_VISION_API_KEY = Deno.env.get('GOOGLE_API_KEY');
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
 
+export async function extractCardInfoFromImage(base64Image: string): Promise<ExtractedCardInfo> {
+  console.log('Processing image with Vision API');
+  
   try {
-    // Clean base64 data
-    const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
-    
-    // First pass - standard OCR with enhanced settings
-    let extractedText = await performEnhancedVisionOCR(googleApiKey, imageData);
-    
-    // Second pass - document OCR for low confidence results
-    if (extractedText.length < 20) {
-      console.log('Low text extraction, trying document OCR');
-      extractedText = await performDocumentOCR(googleApiKey, imageData);
-    }
-    
+    // Extract text using Google Vision API
+    const extractedText = await extractTextFromImage(base64Image);
     console.log('Raw extracted text:', extractedText);
     
-    // Apply post-OCR cleanup
-    const cleanedText = cleanupOCRText(extractedText);
+    // Clean and validate the extracted text
+    const cleanedText = extractedText.trim();
     console.log('Cleaned OCR text:', cleanedText);
     
-    // Parse the extracted text into structured data
+    // If OCR extraction is very poor (less than 3 characters), return a generic error
+    if (cleanedText.length < 3) {
+      console.log('Low text extraction, trying document OCR');
+      // Try document text detection as fallback
+      const documentText = await extractDocumentText(base64Image);
+      if (documentText && documentText.length >= 3) {
+        return await parseExtractedText(documentText);
+      }
+      
+      throw new Error('Could not extract sufficient text from image. Please try a clearer image or use the "Describe Card" tab instead.');
+    }
+    
+    // Parse the extracted text
     return await parseExtractedText(cleanedText);
     
   } catch (error) {
     console.error('Vision OCR failed:', error);
-    throw new Error(`Image processing failed: ${error.message}`);
+    throw error;
   }
 }
 
-async function performEnhancedVisionOCR(apiKey: string, imageData: string): Promise<string> {
-  // Enhanced OCR with preprocessing hints for card images
+async function extractTextFromImage(base64Image: string): Promise<string> {
+  if (!GOOGLE_VISION_API_KEY) {
+    throw new Error('Google Vision API key not configured');
+  }
+
+  const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
+  
+  const requestBody = {
+    requests: [{
+      image: { content: imageData },
+      features: [{ type: 'TEXT_DETECTION', maxResults: 50 }]
+    }]
+  };
+
   const response = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
+    `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [{
-          image: { content: imageData },
-          features: [
-            { 
-              type: 'TEXT_DETECTION', 
-              maxResults: 15
-            },
-            { 
-              type: 'DOCUMENT_TEXT_DETECTION', 
-              maxResults: 10
-            }
-          ],
-          imageContext: {
-            textDetectionParams: {
-              enableTextDetectionConfidenceScore: true
-            },
-            languageHints: ['en']
-          }
-        }]
-      })
+      body: JSON.stringify(requestBody)
     }
   );
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Vision API error: ${response.status} - ${errorText}`);
+    throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
   }
 
-  const data = await response.json();
+  const result = await response.json();
   
-  if (data.responses?.[0]?.error) {
-    throw new Error(`Vision API error: ${data.responses[0].error.message}`);
+  if (result.responses?.[0]?.error) {
+    throw new Error(`Vision API error: ${result.responses[0].error.message}`);
   }
-  
-  // Combine text annotations with document text for better coverage
-  let extractedText = '';
-  
-  if (data.responses?.[0]?.fullTextAnnotation?.text) {
-    extractedText = data.responses[0].fullTextAnnotation.text;
-  } else if (data.responses?.[0]?.textAnnotations?.length > 0) {
-    // Combine individual text annotations
-    extractedText = data.responses[0].textAnnotations
-      .map((annotation: any) => annotation.description)
-      .join(' ');
-  }
-  
-  return extractedText || '';
+
+  const textAnnotations = result.responses?.[0]?.textAnnotations || [];
+  return textAnnotations.length > 0 ? textAnnotations[0].description || '' : '';
 }
 
-async function performDocumentOCR(apiKey: string, imageData: string): Promise<string> {
-  // Document-focused OCR for challenging card images
-  const response = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [{
-          image: { content: imageData },
-          features: [
-            { 
-              type: 'DOCUMENT_TEXT_DETECTION', 
-              maxResults: 20
-            }
-          ],
-          imageContext: {
-            textDetectionParams: {
-              enableTextDetectionConfidenceScore: true,
-              advancedOcrOptions: [
-                'LEGACY_LAYOUT'
-              ]
-            }
-          }
-        }]
-      })
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`Document OCR failed: ${response.status}`);
+async function extractDocumentText(base64Image: string): Promise<string> {
+  if (!GOOGLE_VISION_API_KEY) {
+    return '';
   }
 
-  const data = await response.json();
-  return data.responses?.[0]?.fullTextAnnotation?.text || '';
+  const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
+  
+  const requestBody = {
+    requests: [{
+      image: { content: imageData },
+      features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 10 }]
+    }]
+  };
+
+  try {
+    const response = await fetch(
+      `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      }
+    );
+
+    if (!response.ok) return '';
+
+    const result = await response.json();
+    const fullTextAnnotation = result.responses?.[0]?.fullTextAnnotation;
+    return fullTextAnnotation?.text || '';
+    
+  } catch (error) {
+    console.error('Document OCR fallback failed:', error);
+    return '';
+  }
 }
 
-function cleanupOCRText(rawText: string): string {
-  if (!rawText) return '';
+async function parseExtractedText(text: string): Promise<ExtractedCardInfo> {
+  console.log('Parsing extracted text with OpenAI');
   
-  let cleaned = rawText;
-  
-  // Normalize common card terms and variations
-  const cardTermNormalizations = [
-    // Prizm variations
-    [/PRIZM\s*SILVER|SILVER\s*PRIZM/gi, 'Silver Prizm'],
-    [/PRIZM\s*GOLD|GOLD\s*PRIZM/gi, 'Gold Prizm'],
-    [/PRIZM\s*RED|RED\s*PRIZM/gi, 'Red Prizm'],
-    [/PRIZM\s*BLUE|BLUE\s*PRIZM/gi, 'Blue Prizm'],
-    
-    // Common misreads
-    [/#(\d+)|NO\.?\s*(\d+)|№\s*(\d+)/gi, '#$1$2$3'], // Normalize card numbers
-    [/\b(\d{4})\s*PANINI/gi, '$1 Panini'], // Year + brand
-    [/\bRC\b/gi, 'RC'], // Rookie card
-    [/\bROOKIE\b/gi, 'Rookie'],
-    
-    // Player name corrections (common OCR mistakes)
-    [/JAYDEN\s*DANIELS?/gi, 'Jayden Daniels'],
-    [/JAYD[E3]N\s*DANI[E3]LS?/gi, 'Jayden Daniels'],
-    
-    // Set name normalizations
-    [/PANINI\s*PRIZM/gi, 'Panini Prizm'],
-    [/TOPPS\s*CHROME/gi, 'Topps Chrome'],
-    [/BOWMAN\s*CHROME/gi, 'Bowman Chrome'],
-    
-    // Grade normalizations
-    [/PSA\s*(\d+)/gi, 'PSA $1'],
-    [/BGS\s*(\d+(?:\.\d+)?)/gi, 'BGS $1'],
-    [/SGC\s*(\d+)/gi, 'SGC $1'],
-    
-    // Remove extra whitespace and clean up
-    [/\s+/g, ' '],
-    [/^\s+|\s+$/g, '']
-  ];
-  
-  // Apply all normalizations
-  cardTermNormalizations.forEach(([pattern, replacement]) => {
-    cleaned = cleaned.replace(pattern, replacement);
-  });
-  
-  return cleaned;
-}
-
-async function parseExtractedText(rawText: string): Promise<ExtractedCardInfo> {
-  const openaiApiKey = Deno.env.get('OPEN AI KEY');
-  
-  if (!openaiApiKey) {
+  if (!OPENAI_API_KEY) {
     throw new Error('OpenAI API key not configured');
   }
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${openaiApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4.1-2025-04-14',
-      messages: [
-        {
-          role: 'system',
-          content: `You are an expert trading card text parser. Extract structured information from OCR text of trading cards.
-
-CRITICAL PARSING RULES:
-- Player names: Handle common OCR errors (JAYD3N = JAYDEN, DANI3LS = DANIELS)
-- Years: Look for 4-digit years (1950-2025), prioritize recent years for modern cards
-- Sets: Normalize "Panini Prizm", "Topps Chrome", etc. Handle "PRIZM SILVER" = "Silver Prizm"
-- Card numbers: Extract from #347, No. 347, №347, or standalone numbers near player names
-- Grades: Look for PSA 10, BGS 9.5, SGC patterns
-- Variations: Silver Prizm, Gold Prizm, Chrome, Refractor, etc.
-- Sport inference: Use team names, card design cues, context
-
-Return ONLY valid JSON:
-{
-  "player": "Player Name",
-  "year": "YYYY",
-  "set": "Normalized Set Name", 
-  "cardNumber": "Card Number",
-  "grade": "PSA 10" or "BGS 9.5" or null,
-  "sport": "basketball|football|baseball|hockey|soccer|other",
-  "confidence": 0.0-1.0,
-  "rawText": "cleaned OCR text"
-}`
-        },
-        {
-          role: 'user',
-          content: `Parse this trading card OCR text and extract accurate card details:\n\n${rawText}`
-        }
-      ],
-      temperature: 0.1,
-      max_tokens: 400
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI parsing failed: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content?.trim();
+  const prompt = `Parse this trading card text and extract information. Return valid JSON only:
   
-  if (!content) {
-    throw new Error('No parsing result from OpenAI');
-  }
+  Text: "${text}"
+  
+  Extract these fields (use "unknown" if not found):
+  - player (full name)
+  - year (4-digit year)
+  - set (card set name like "Prizm", "Donruss", etc.)
+  - cardNumber (number after # symbol)
+  - grade (PSA/BGS grade if mentioned)
+  - sport (football, basketball, baseball, etc.)
+  
+  Return only this JSON format:
+  {
+    "player": "Player Name",
+    "year": "2024",
+    "set": "Set Name", 
+    "cardNumber": "123",
+    "grade": "PSA 10",
+    "sport": "football"
+  }`;
 
   try {
-    const parsed = JSON.parse(content);
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 300
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    
+    if (!content) {
+      throw new Error('No response from OpenAI');
+    }
+
+    // Clean up the JSON response
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('No valid JSON found in OpenAI response');
+    }
+
+    const parsedResult = JSON.parse(jsonMatch[0]);
+    console.log('Parsed OpenAI result:', parsedResult);
     
     // Validate required fields
-    if (!parsed.player || !parsed.year || !parsed.sport) {
+    if (!parsedResult.player || parsedResult.player === 'unknown' || parsedResult.player.trim().length < 2) {
       throw new Error('Missing required fields in parsed result');
     }
+
+    // Calculate confidence based on how many fields were successfully extracted
+    let confidence = 0.5; // Base confidence
+    const fields = ['player', 'year', 'set', 'cardNumber', 'sport'];
+    const validFields = fields.filter(field => 
+      parsedResult[field] && parsedResult[field] !== 'unknown' && parsedResult[field].trim().length > 0
+    );
     
+    confidence = Math.min(0.98, 0.4 + (validFields.length / fields.length) * 0.6);
+
     return {
-      player: parsed.player,
-      year: parsed.year,
-      set: parsed.set || 'Unknown',
-      cardNumber: parsed.cardNumber || '',
-      grade: parsed.grade || undefined,
-      sport: parsed.sport,
-      confidence: Math.max(0, Math.min(1, parsed.confidence || 0.5)),
-      rawText: rawText.substring(0, 500) // Limit stored text
+      player: parsedResult.player,
+      year: parsedResult.year || 'unknown',
+      set: parsedResult.set || 'unknown',
+      cardNumber: parsedResult.cardNumber || 'unknown',
+      grade: parsedResult.grade,
+      sport: parsedResult.sport || 'unknown',
+      confidence,
+      rawText: text
     };
-    
-  } catch (parseError) {
-    console.error('Failed to parse OpenAI JSON response:', parseError);
+
+  } catch (error) {
+    console.error('Failed to parse OpenAI JSON response:', error);
     throw new Error('Could not parse card information from text');
   }
 }
 
 export async function parseCardDescription(description: string): Promise<ExtractedCardInfo> {
-  const openaiApiKey = Deno.env.get('OPEN AI KEY');
+  console.log('Processing text description');
   
-  if (!openaiApiKey) {
-    throw new Error('OpenAI API key not configured');
+  // Clean the description
+  const cleanedDescription = description
+    .replace(/sold via:\s*ebay/gi, '') // Remove "Sold Via: eBay" text
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Use simple regex patterns for common card formats
+  const patterns = {
+    year: /\b(19|20)\d{2}\b/,
+    player: /(?:^|\s)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?=\s|$)/,
+    set: /\b(Prizm|Donruss|Topps|Panini|Select|Optic|Chronicles|Contenders|Gridiron Kings)\b/i,
+    cardNumber: /#(\d+)/,
+    grade: /(PSA|BGS|SGC)\s*(\d+(?:\.\d+)?)/i,
+    team: /\b(Cowboys|Chiefs|Eagles|Patriots|Packers|Steelers|49ers|Rams|Bills|Dolphins|Jets|Titans|Colts|Texans|Jaguars|Broncos|Chargers|Raiders|Ravens|Browns|Bengals|Cardinals|Seahawks|Saints|Falcons|Panthers|Buccaneers|Bears|Lions|Vikings|Commanders|Giants|Washington)\b/i
+  };
+
+  const year = cleanedDescription.match(patterns.year)?.[0] || 'unknown';
+  const playerMatch = cleanedDescription.match(/(?:^|\s)([A-Z][a-z]+(?:\s+[A-Z][a-z]+))(?=\s)/);
+  const player = playerMatch?.[1] || 'unknown';
+  const set = cleanedDescription.match(patterns.set)?.[0] || 'unknown';
+  const cardNumber = cleanedDescription.match(patterns.cardNumber)?.[1] || 'unknown';
+  const gradeMatch = cleanedDescription.match(patterns.grade);
+  const grade = gradeMatch ? `${gradeMatch[1]} ${gradeMatch[2]}` : undefined;
+
+  // Determine sport based on context
+  let sport = 'unknown';
+  if (/\b(RC|Rookie|QB|RB|WR|TE|football|NFL|Commanders|Cowboys|Chiefs)\b/i.test(cleanedDescription)) {
+    sport = 'football';
+  } else if (/\b(basketball|NBA|Lakers|Warriors|Celtics)\b/i.test(cleanedDescription)) {
+    sport = 'basketball';
+  } else if (/\b(baseball|MLB|Yankees|Dodgers|Red Sox)\b/i.test(cleanedDescription)) {
+    sport = 'baseball';
   }
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${openaiApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4.1-2025-04-14',
-      messages: [
-        {
-          role: 'system',
-          content: `Parse trading card descriptions into structured data. Extract player name, year, set, card number, grade, and sport.
+  // Calculate confidence
+  const extractedFields = [year, player, set, cardNumber, sport].filter(f => f !== 'unknown');
+  const confidence = Math.min(0.98, 0.3 + (extractedFields.length / 5) * 0.7);
 
-Return ONLY valid JSON:
-{
-  "player": "Player Name",
-  "year": "YYYY", 
-  "set": "Set Name",
-  "cardNumber": "Card Number",
-  "grade": "PSA 10" or "BGS 9.5" or null,
-  "sport": "basketball|football|baseball|hockey|soccer|other", 
-  "confidence": 0.0-1.0,
-  "rawText": "original description"
-}`
-        },
-        {
-          role: 'user',
-          content: `Parse this card description: ${description}`
-        }
-      ],
-      temperature: 0.1,
-      max_tokens: 300
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI description parsing failed: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content?.trim();
-  
-  try {
-    const parsed = JSON.parse(content);
-    return {
-      player: parsed.player || 'Unknown',
-      year: parsed.year || 'Unknown',
-      set: parsed.set || 'Unknown', 
-      cardNumber: parsed.cardNumber || '',
-      grade: parsed.grade || undefined,
-      sport: parsed.sport || 'other',
-      confidence: Math.max(0, Math.min(1, parsed.confidence || 0.8)),
-      rawText: description
-    };
-  } catch (error) {
-    throw new Error('Could not parse card description');
-  }
+  return {
+    player,
+    year,
+    set,
+    cardNumber,
+    grade,
+    sport,
+    confidence,
+    rawText: cleanedDescription
+  };
 }

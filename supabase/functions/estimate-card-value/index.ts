@@ -106,7 +106,7 @@ serve(async (req) => {
         console.log('Parsed card info:', cardInfo);
       }
       
-      if (!cardInfo.player || cardInfo.player === 'Unknown') {
+      if (!cardInfo.player || cardInfo.player === 'unknown' || cardInfo.player === 'Unknown') {
         return errorResponse('Could not identify player', 'Unable to extract player name from input. Please try a clearer image or more detailed description.', 400);
       }
       
@@ -211,6 +211,15 @@ function errorResponse(error: string, details: string, status: number, traceId?:
 }
 
 function handleParsingError(error: any): Response {
+  if (error.message.includes('Could not extract sufficient text from image')) {
+    return errorResponse(
+      'Image text extraction failed',
+      'The image quality is too poor for text extraction. Please try a clearer image or use the "Describe Card" tab instead.',
+      400,
+      'poor-image-quality'
+    );
+  }
+
   if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
     return errorResponse(
       'Google Vision API billing not enabled',
