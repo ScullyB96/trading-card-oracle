@@ -1,3 +1,4 @@
+
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -6,27 +7,16 @@ import { ImageUpload } from "@/components/ImageUpload";
 import { CardDescription } from "@/components/CardDescription";
 import { SourceSelection } from "@/components/SourceSelection";
 import { CompLogicSelection } from "@/components/CompLogicSelection";
-import { ResultsDisplay } from "@/components/ResultsDisplay";
+import { ResultsDisplay, SalesResult } from "@/components/ResultsDisplay";
 import { Sparkles, TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { toast } from "@/components/ui/use-toast";
+import { toast } from "@/hooks/use-toast";
 
 export interface EstimationRequest {
-  image?: File;
+  image?: string;
   description?: string;
   sources: string[];
   compLogic: string;
-}
-
-export interface SalesResult {
-  id: string;
-  title: string;
-  price: number;
-  date: string;
-  source: string;
-  url: string;
-  thumbnail?: string;
-  selected: boolean;
 }
 
 const Index = () => {
@@ -38,6 +28,8 @@ const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState<SalesResult[]>([]);
   const [estimatedValue, setEstimatedValue] = useState<number | null>(null);
+  const [logicUsed, setLogicUsed] = useState<string>("");
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -98,15 +90,22 @@ const Index = () => {
       }
 
       if (data.success) {
-        setResults(data.salesResults);
+        // Set all results as selected by default
+        const salesWithSelection = data.salesResults.map((result: any) => ({
+          ...result,
+          selected: true
+        }));
+        
+        setResults(salesWithSelection);
         setEstimatedValue(data.estimatedValue);
+        setLogicUsed(data.logicUsed);
+        setWarnings(data.warnings || []);
         
         toast({
           title: "Analysis Complete",
           description: `Found ${data.salesResults.length} comparable sales. Estimated value: $${data.estimatedValue.toFixed(2)}`,
         });
       } else {
-        // Handle specific error cases with better messaging
         console.error('Function returned error:', data);
         
         if (data.traceId === 'billing-disabled') {
@@ -115,8 +114,6 @@ const Index = () => {
             description: "Google Vision API requires billing to be enabled. Please switch to the 'Describe Card' tab.",
             variant: "destructive"
           });
-          
-          // Automatically switch to description tab
           setActiveTab("description");
         } else if (data.traceId === 'vision-api-disabled') {
           toast({
@@ -124,8 +121,6 @@ const Index = () => {
             description: data.details || "Please use the card description instead.",
             variant: "destructive"
           });
-          
-          // Automatically switch to description tab as suggested
           setActiveTab("description");
         } else {
           toast({
@@ -142,12 +137,10 @@ const Index = () => {
       let errorMessage = "Failed to estimate card value. Please try again.";
       let errorTitle = "Error";
       
-      // Handle different types of errors
       if (error.name === 'FunctionsHttpError') {
         errorTitle = "Service Error";
         errorMessage = "There was an issue processing your request. Please try again or use the card description instead.";
         
-        // If it was an image processing issue, switch to description tab
         if (activeTab === "image") {
           setActiveTab("description");
           errorMessage = "There was an issue processing the image. Please try using the card description instead.";
@@ -161,6 +154,77 @@ const Index = () => {
       });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const calculateEstimatedValue = (selectedResults: SalesResult[], logic: string): number => {
+    if (selectedResults.length === 0) return 0;
+
+    const prices = selectedResults.map(r => r.price).sort((a, b) => a - b);
+    
+    switch (logic) {
+      case 'lastSale':
+        return selectedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0].price;
+      
+      case 'average3':
+        const recent3 = selectedResults
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .slice(0, 3)
+          .map(r => r.price);
+        return Math.round((recent3.reduce((sum, price) => sum + price, 0) / recent3.length) * 100) / 100;
+      
+      case 'average5':
+        const recent5 = selectedResults
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .slice(0, 5)
+          .map(r => r.price);
+        return Math.round((recent5.reduce((sum, price) => sum + price, 0) / recent5.length) * 100) / 100;
+      
+      case 'median':
+        const mid = Math.floor(prices.length / 2);
+        return prices.length % 2 === 0 
+          ? Math.round(((prices[mid - 1] + prices[mid]) / 2) * 100) / 100
+          : prices[mid];
+      
+      case 'conservative':
+        const index = Math.floor(prices.length * 0.25);
+        return prices[index];
+      
+      case 'mode':
+        const ranges: { [key: string]: number[] } = {};
+        prices.forEach(price => {
+          const range = Math.floor(price / 20) * 20;
+          if (!ranges[range]) ranges[range] = [];
+          ranges[range].push(price);
+        });
+        
+        const mostCommonRange = Object.values(ranges).reduce((max, current) => 
+          current.length > max.length ? current : max
+        );
+        
+        return Math.round((mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length) * 100) / 100;
+      
+      default:
+        return Math.round((prices.reduce((sum, price) => sum + price, 0) / prices.length) * 100) / 100;
+    }
+  };
+
+  const handleResultToggle = (id: string) => {
+    const updatedResults = results.map(result => 
+      result.id === id 
+        ? { ...result, selected: !result.selected }
+        : result
+    );
+    
+    setResults(updatedResults);
+    
+    const selectedResults = updatedResults.filter(r => r.selected);
+    
+    if (selectedResults.length > 0) {
+      const newEstimatedValue = calculateEstimatedValue(selectedResults, logicUsed || compLogic);
+      setEstimatedValue(newEstimatedValue);
+    } else {
+      setEstimatedValue(null);
     }
   };
 
@@ -265,29 +329,10 @@ const Index = () => {
             <ResultsDisplay 
               results={results}
               estimatedValue={estimatedValue}
-              onResultToggle={(id) => {
-                setResults(results.map(result => 
-                  result.id === id 
-                    ? { ...result, selected: !result.selected }
-                    : result
-                ));
-                
-                // Recalculate estimated value based on selected results
-                const updatedResults = results.map(result => 
-                  result.id === id 
-                    ? { ...result, selected: !result.selected }
-                    : result
-                );
-                const selectedResults = updatedResults.filter(r => r.selected);
-                
-                if (selectedResults.length > 0) {
-                  const total = selectedResults.reduce((sum, r) => sum + r.price, 0);
-                  setEstimatedValue(Math.round((total / selectedResults.length) * 100) / 100);
-                } else {
-                  setEstimatedValue(null);
-                }
-              }}
+              onResultToggle={handleResultToggle}
               isLoading={isLoading}
+              logicUsed={logicUsed}
+              warnings={warnings}
             />
           </div>
         </div>
