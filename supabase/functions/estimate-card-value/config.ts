@@ -57,26 +57,34 @@ export function loadConfiguration(): AppConfig {
     },
   };
 
-  if (!config.supabaseUrl || !config.supabaseAnonKey || !config.googleSearchApiKey || !config.googleSearchEngineId) {
-    throw new ConfigurationError("Missing required Supabase or Google Search configuration");
+  // Only check for critical environment variables that are absolutely required
+  if (!config.supabaseUrl || !config.supabaseAnonKey) {
+    throw new ConfigurationError("Missing required Supabase configuration");
   }
   
+  // Log configuration status without throwing errors for optional APIs
   if (config.googleVisionApiKey) {
     console.log('✅ Google Vision API configured successfully');
   } else {
-    console.warn('Google Vision API key not configured - image processing will be disabled');
+    console.warn('⚠️ Google Vision API key not configured - image processing will be disabled');
   }
   
   if (config.openaiApiKey) {
     console.log('✅ OpenAI API configured successfully');
   } else {
-    console.warn('OpenAI API key not configured - AI features may be limited');
+    console.warn('⚠️ OpenAI API key not configured - AI features may be limited');
+  }
+
+  if (config.googleSearchApiKey && config.googleSearchEngineId) {
+    console.log('✅ Google Search API configured successfully');
+  } else {
+    console.warn('⚠️ Google Search API not fully configured - search features may be limited');
   }
 
   if (config.ebayAppId) {
     console.log('✅ eBay Finding API configured successfully');
   } else {
-    console.warn('eBay App ID not configured - eBay Finding API will be disabled');
+    console.warn('⚠️ eBay App ID not configured - eBay Finding API will be disabled');
   }
 
   return config;
