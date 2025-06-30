@@ -1,8 +1,8 @@
-
 import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
 import { fetch130PointComps } from './scrapers/130point-scraper.ts';
 import { combineAndNormalizeResults, NormalizedComp } from './scrapers/normalizer.ts';
 import { findRelevantMatches, calculateCompValue, MatchResult, CompingResult } from './scrapers/matching-logic.ts';
+import { discoverCardListings, SearchDiscoveryResult } from './search-discovery.ts';
 import { ScrapingError, TimeoutError } from './errors.ts';
 import { withTimeout, generateTraceId, rateLimitedExecutor } from './utils.ts';
 import { config } from './config.ts';
@@ -55,6 +55,7 @@ export interface ProductionScraperResponse {
     rawResultCounts: { [key: string]: number };
     totalProcessingTime: number;
     traceId: string;
+    searchDiscovery?: SearchDiscoveryResult;
   };
 }
 
@@ -70,7 +71,7 @@ export async function fetchProductionComps(
   const logger = new Logger(traceId);
   const startTime = Date.now();
   
-  logger.info('Starting resilient production scraping', {
+  logger.info('Starting enhanced production scraping with search discovery', {
     operation: 'fetchProductionComps',
     sources,
     compLogic,
@@ -83,16 +84,39 @@ export async function fetchProductionComps(
   });
 
   try {
-    // Validate sources with fallback
+    // Step 1: Search-driven discovery (if enabled)
+    let searchDiscovery: SearchDiscoveryResult | undefined;
+    if (config.search.enabled) {
+      try {
+        searchDiscovery = await discoverCardListings(query, logger);
+        logger.info('Search discovery completed', {
+          operation: 'fetchProductionComps',
+          ebayUrls: searchDiscovery.ebayUrls.length,
+          pointUrls: searchDiscovery.pointUrls.length,
+          totalResults: searchDiscovery.totalResults
+        });
+      } catch (error) {
+        logger.error('Search discovery failed, falling back to direct scraping', error);
+        searchDiscovery = {
+          ebayUrls: [],
+          pointUrls: [],
+          searchQueries: [],
+          totalResults: 0,
+          errors: [{ source: 'Search Discovery', message: `Search failed: ${error.message}` }]
+        };
+      }
+    }
+
+    // Step 2: Validate sources with fallback
     const validSources = validateSourcesWithFallback(sources, logger);
     
-    // Build multiple search strategies
-    const searchStrategies = buildSearchStrategies(query, logger);
+    // Step 3: Build search strategies (enhanced with discovered URLs)
+    const searchStrategies = buildEnhancedSearchStrategies(query, searchDiscovery, logger);
     
-    // Execute resilient scraping
-    const scrapingResult = await executeResilientScraping(searchStrategies, validSources, logger);
+    // Step 4: Execute resilient scraping
+    const scrapingResult = await executeResilientScraping(searchStrategies, validSources, logger, searchDiscovery);
     
-    // Process results with error tolerance
+    // Step 5: Process results with error tolerance
     const result = await processResultsWithFallbacks(scrapingResult, query, compLogic, logger);
     
     const processingTime = Date.now() - startTime;
@@ -104,7 +128,8 @@ export async function fetchProductionComps(
         attemptedQueries: searchStrategies,
         rawResultCounts: scrapingResult.rawResultCounts,
         totalProcessingTime: processingTime,
-        traceId
+        traceId,
+        searchDiscovery
       }
     };
 
@@ -136,8 +161,16 @@ function validateSourcesWithFallback(sources: string[], logger: Logger): string[
   return validSources;
 }
 
-function buildSearchStrategies(query: SearchQuery, logger: Logger): string[] {
-  logger.info('Building resilient search strategies', { operation: 'buildSearchStrategies' });
+function buildEnhancedSearchStrategies(
+  query: SearchQuery,
+  searchDiscovery: SearchDiscoveryResult | undefined,
+  logger: Logger
+): string[] {
+  logger.info('Building enhanced search strategies with discovery data', { 
+    operation: 'buildEnhancedSearchStrategies',
+    hasSearchDiscovery: !!searchDiscovery,
+    discoveredUrls: searchDiscovery?.totalResults || 0
+  });
   
   const strategies: string[] = [];
   const parts = {
@@ -149,38 +182,51 @@ function buildSearchStrategies(query: SearchQuery, logger: Logger): string[] {
     sport: query.sport && query.sport !== 'unknown' && query.sport !== 'other' ? query.sport.trim() : ''
   };
 
-  // Strategy 1: Full precision search
+  // Priority 1: If we found specific URLs from search, use them for targeted queries
+  if (searchDiscovery && searchDiscovery.totalResults > 0) {
+    // Use search-discovered terms as high-priority strategies
+    if (parts.year && parts.player && parts.set) {
+      strategies.push(`${parts.year} ${parts.set} ${parts.player} Rookie`);
+      strategies.push(`${parts.year} ${parts.set} ${parts.player} RC`);
+    }
+  }
+
+  // Priority 2: Full precision search
   if (parts.year && parts.player && parts.set && parts.cardNumber) {
     strategies.push(`${parts.year} ${parts.set} ${parts.player} #${parts.cardNumber}`);
   }
 
-  // Strategy 2: High precision without card number
+  // Priority 3: High precision without card number
   if (parts.year && parts.player && parts.set) {
     strategies.push(`${parts.year} ${parts.set} ${parts.player} Rookie`);
     strategies.push(`${parts.year} ${parts.set} ${parts.player} RC`);
   }
 
-  // Strategy 3: Player and year focused
+  // Priority 4: Player and year focused
   if (parts.player && parts.year) {
     strategies.push(`${parts.player} ${parts.year} Rookie Card`);
     strategies.push(`${parts.player} ${parts.year} RC`);
   }
 
-  // Strategy 4: Brand-specific searches
+  // Priority 5: Brand-specific searches based on discovered patterns
   if (parts.player && parts.year) {
     const popularSets = ['Prizm', 'Select', 'Donruss', 'Optic', 'Chronicles'];
-    popularSets.forEach(set => {
-      strategies.push(`${parts.player} ${parts.year} ${set} RC`);
-    });
+    
+    // If search discovery found specific brands, prioritize those
+    if (searchDiscovery && searchDiscovery.totalResults > 0) {
+      popularSets.forEach(set => {
+        strategies.push(`${parts.player} ${parts.year} ${set} RC`);
+      });
+    }
   }
 
-  // Strategy 5: Broad player search
+  // Priority 6: Broad fallback searches
   if (parts.player) {
     strategies.push(`${parts.player} Rookie Card`);
     strategies.push(`${parts.player} RC`);
   }
 
-  // Strategy 6: Sport-specific fallback
+  // Priority 7: Sport-specific fallback
   if (parts.player && parts.sport) {
     strategies.push(`${parts.player} ${parts.sport} Rookie`);
   }
@@ -188,12 +234,13 @@ function buildSearchStrategies(query: SearchQuery, logger: Logger): string[] {
   const finalStrategies = strategies
     .filter(s => s.length > 8)
     .filter(s => !s.includes('unknown'))
-    .slice(0, Math.max(6, config.limits.maxQueries)); // Ensure we have enough strategies
+    .slice(0, Math.max(8, config.limits.maxQueries)); // Increased for enhanced approach
 
-  logger.info('Search strategies built', { 
-    operation: 'buildSearchStrategies',
+  logger.info('Enhanced search strategies built', { 
+    operation: 'buildEnhancedSearchStrategies',
     strategyCount: finalStrategies.length,
-    strategies: finalStrategies
+    strategies: finalStrategies,
+    basedOnDiscovery: !!searchDiscovery && searchDiscovery.totalResults > 0
   });
 
   return finalStrategies;
@@ -209,7 +256,8 @@ interface ResilientScrapingResult {
 async function executeResilientScraping(
   searchStrategies: string[],
   validSources: string[],
-  logger: Logger
+  logger: Logger,
+  searchDiscovery: SearchDiscoveryResult | undefined
 ): Promise<ResilientScrapingResult> {
   logger.info('Executing resilient scraping', { 
     operation: 'executeResilientScraping',
@@ -225,7 +273,7 @@ async function executeResilientScraping(
   // Try each search strategy until we get sufficient results
   for (const [index, searchQuery] of searchStrategies.entries()) {
     try {
-      const strategyResult = await processSearchQueryResilient(searchQuery, validSources, logger);
+      const strategyResult = await processSearchQueryResilient(searchQuery, validSources, logger, searchDiscovery);
       
       allComps = allComps.concat(strategyResult.comps);
       allErrors = allErrors.concat(strategyResult.errors);
@@ -291,7 +339,8 @@ async function executeResilientScraping(
 async function processSearchQueryResilient(
   searchQuery: string,
   validSources: string[],
-  logger: Logger
+  logger: Logger,
+  searchDiscovery: SearchDiscoveryResult | undefined
 ): Promise<{ comps: NormalizedComp[]; errors: Array<{ source: string; message: string }>; rawResultCounts: { [key: string]: number }; successfulSources: string[] }> {
   
   const errors: Array<{ source: string; message: string }> = [];
