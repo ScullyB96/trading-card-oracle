@@ -1,9 +1,8 @@
-
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
-import { extractCardInfoFromImage, parseCardDescription, ExtractedCardInfo } from './vision-parser.ts';
-import { fetchProductionComps, SearchQuery, ProductionScraperResponse } from './sales-scrapers.ts';
+import { extractCardInfoFromImage, parseCardDescription, ExtractedCardKeywords } from './vision-parser.ts';
+import { fetchProductionComps, ProductionScraperResponse } from './sales-scrapers.ts';
 import { config } from './config.ts';
 import { Logger } from './logger.ts';
 import { generateTraceId } from './utils.ts';
@@ -23,7 +22,7 @@ interface EstimationRequest {
 
 interface EstimationResponse {
   success: boolean;
-  cardInfo?: ExtractedCardInfo;
+  cardInfo?: ExtractedCardKeywords;
   salesResults?: any[];
   estimatedValue?: number;
   confidence?: number;
@@ -88,7 +87,6 @@ async function validateAndParseRequest(req: Request): Promise<{ data: Estimation
   try {
     const requestData: EstimationRequest = await req.json();
     
-    // Validate sources
     if (!requestData.sources || requestData.sources.length === 0) {
       errors.push('No data sources selected');
     } else {
@@ -99,14 +97,12 @@ async function validateAndParseRequest(req: Request): Promise<{ data: Estimation
       requestData.sources = validSources;
     }
     
-    // Validate input
     if (!requestData.image && !requestData.description?.trim()) {
       errors.push('No input provided - either image or description is required');
     }
     
-    // Validate comp logic
     if (!requestData.compLogic) {
-      requestData.compLogic = 'average3'; // Default fallback
+      requestData.compLogic = 'average3';
     }
     
     return { data: requestData, errors };
@@ -123,12 +119,11 @@ async function validateAndParseRequest(req: Request): Promise<{ data: Estimation
 async function safeExtractCardInfo(
   requestData: EstimationRequest, 
   logger: Logger
-): Promise<{ cardInfo?: ExtractedCardInfo; errors: Array<{ source: string; message: string }> }> {
+): Promise<{ cardInfo?: ExtractedCardKeywords; errors: Array<{ source: string; message: string }> }> {
   const errors: Array<{ source: string; message: string }> = [];
   
   try {
     if (requestData.image) {
-      // Check API availability
       if (!config.googleVisionApiKey) {
         errors.push({
           source: 'Google Vision API',
@@ -137,7 +132,7 @@ async function safeExtractCardInfo(
         return { errors };
       }
       
-      logger.info('Processing image with Vision API');
+      logger.info('Processing image with NEW ARCHITECTURE Vision API');
       const cardInfo = await extractCardInfoFromImage(requestData.image);
       
       if (!cardInfo.player || cardInfo.player === 'unknown') {
@@ -148,15 +143,19 @@ async function safeExtractCardInfo(
         return { errors };
       }
       
-      logger.info('Image processing successful', { 
+      logger.info('NEW ARCHITECTURE image processing successful', { 
         player: cardInfo.player,
+        keywords: {
+          parallels: cardInfo.parallels.length,
+          specialAttributes: cardInfo.specialAttributes.length
+        },
         confidence: cardInfo.confidence 
       });
       
       return { cardInfo, errors };
       
     } else if (requestData.description?.trim()) {
-      logger.info('Processing text description');
+      logger.info('Processing text description with NEW ARCHITECTURE');
       const cardInfo = await parseCardDescription(requestData.description.trim());
       
       if (!cardInfo.player || cardInfo.player === 'unknown') {
@@ -167,7 +166,7 @@ async function safeExtractCardInfo(
         return { errors };
       }
       
-      logger.info('Text processing successful', { 
+      logger.info('NEW ARCHITECTURE text processing successful', { 
         player: cardInfo.player,
         confidence: cardInfo.confidence 
       });
@@ -183,7 +182,7 @@ async function safeExtractCardInfo(
     return { errors };
     
   } catch (error) {
-    logger.error('Card info extraction failed', error);
+    logger.error('NEW ARCHITECTURE card info extraction failed', error);
     
     errors.push({
       source: requestData.image ? 'Image Processing' : 'Text Processing',
@@ -195,7 +194,7 @@ async function safeExtractCardInfo(
 }
 
 async function safeFetchComps(
-  cardInfo: ExtractedCardInfo,
+  cardInfo: ExtractedCardKeywords,
   sources: string[],
   compLogic: string,
   logger: Logger
@@ -203,34 +202,35 @@ async function safeFetchComps(
   const errors: Array<{ source: string; message: string }> = [];
   
   try {
-    const searchQuery: SearchQuery = {
+    logger.info('Starting NEW ARCHITECTURE sales data fetch', { 
       player: cardInfo.player,
-      year: cardInfo.year,
-      set: cardInfo.set,
-      cardNumber: cardInfo.cardNumber,
-      grade: cardInfo.grade,
-      sport: cardInfo.sport
-    };
+      keywords: {
+        year: cardInfo.year,
+        set: cardInfo.set,
+        parallels: cardInfo.parallels,
+        specialAttributes: cardInfo.specialAttributes
+      },
+      sources, 
+      compLogic 
+    });
     
-    logger.info('Starting sales data fetch', { searchQuery, sources, compLogic });
+    const response = await fetchProductionComps(cardInfo, sources, compLogic);
     
-    const response = await fetchProductionComps(searchQuery, sources, compLogic);
-    
-    // Collect any errors from the scraping process
     if (response.errors && response.errors.length > 0) {
       errors.push(...response.errors);
     }
     
-    logger.info('Sales data fetch completed', {
+    logger.info('NEW ARCHITECTURE sales data fetch completed', {
       success: response.estimatedValue !== '$0.00',
       compsFound: response.comps?.length || 0,
-      estimatedValue: response.estimatedValue
+      estimatedValue: response.estimatedValue,
+      architecture: 'Discover-then-Scrape'
     });
     
     return { response, errors };
     
   } catch (error) {
-    logger.error('Sales data fetch failed', error);
+    logger.error('NEW ARCHITECTURE sales data fetch failed', error);
     
     errors.push({
       source: 'Sales Data Fetcher',
@@ -242,7 +242,6 @@ async function safeFetchComps(
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders, status: 200 });
   }
@@ -251,10 +250,9 @@ serve(async (req) => {
   const logger = new Logger(traceId);
   const startTime = Date.now();
   
-  logger.info('Request received', { method: req.method });
+  logger.info('NEW ARCHITECTURE Request received', { method: req.method });
   
   try {
-    // Step 1: Validate and parse request
     const { data: requestData, errors: validationErrors } = await validateAndParseRequest(req);
     
     if (validationErrors.length > 0) {
@@ -270,18 +268,17 @@ serve(async (req) => {
       return createJsonResponse(errorResponse, 400);
     }
     
-    logger.info('Request validated successfully', {
+    logger.info('NEW ARCHITECTURE Request validated successfully', {
       hasImage: !!requestData.image,
       hasDescription: !!requestData.description,
       sources: requestData.sources,
       compLogic: requestData.compLogic
     });
     
-    // Step 2: Extract card information
     const { cardInfo, errors: cardErrors } = await safeExtractCardInfo(requestData, logger);
     
     if (!cardInfo) {
-      logger.warn('Card info extraction failed', { errors: cardErrors });
+      logger.warn('NEW ARCHITECTURE Card info extraction failed', { errors: cardErrors });
       
       const errorResponse = createErrorResponse(
         'Unable to extract card information',
@@ -293,7 +290,6 @@ serve(async (req) => {
       return createJsonResponse(errorResponse, 400);
     }
     
-    // Step 3: Fetch sales comparables
     const { response: productionResponse, errors: salesErrors } = await safeFetchComps(
       cardInfo,
       requestData.sources,
@@ -301,14 +297,11 @@ serve(async (req) => {
       logger
     );
     
-    // Collect all errors
     const allErrors = [...cardErrors, ...salesErrors];
     
-    // Step 4: Build final response
     if (productionResponse) {
-      // We have sales data - create success response
       const processingTime = Date.now() - startTime;
-      logger.performance('Request completed', processingTime);
+      logger.performance('NEW ARCHITECTURE Request completed', processingTime);
       
       const successResponse = createSuccessResponse({
         cardInfo,
@@ -331,8 +324,7 @@ serve(async (req) => {
       return createJsonResponse(successResponse, 200);
       
     } else {
-      // No sales data but we should still return a structured response
-      logger.warn('No sales data available', { errors: allErrors });
+      logger.warn('NEW ARCHITECTURE No sales data available', { errors: allErrors });
       
       const errorResponse = createErrorResponse(
         'No sales data available',
@@ -341,7 +333,6 @@ serve(async (req) => {
         'Unable to find comparable sales for this card'
       );
       
-      // Include card info if we have it
       if (cardInfo) {
         errorResponse.cardInfo = cardInfo;
       }
@@ -350,9 +341,8 @@ serve(async (req) => {
     }
     
   } catch (error) {
-    // Final safety net - should never reach here with proper error handling above
     const processingTime = Date.now() - startTime;
-    logger.error('Unhandled error in main request handler', error, { processingTime });
+    logger.error('NEW ARCHITECTURE Unhandled error in main request handler', error, { processingTime });
     
     const errorResponse = createErrorResponse(
       'An unexpected error occurred',
