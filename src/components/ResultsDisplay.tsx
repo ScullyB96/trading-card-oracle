@@ -135,74 +135,74 @@ export const ResultsDisplay = ({
                 </Badge>
               </div>
               
-              <div className="space-y-3 max-h-96 overflow-y-auto">
-                {results.map((result) => (
-                  <div
-                    key={result.id}
-                    className={`p-4 rounded-lg border transition-all ${
-                      result.selected 
-                        ? 'border-blue-300 bg-blue-50' 
-                        : 'border-gray-200 bg-white opacity-75'
-                    }`}
-                  >
-                    <div className="flex items-start space-x-3">
-                      <Checkbox
-                        checked={result.selected}
-                        onCheckedChange={() => onResultToggle(result.id)}
-                        className="mt-1"
-                      />
-                      
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between mb-2">
-                          <h5 className="text-sm font-medium text-gray-800 line-clamp-2">
-                            {result.title}
-                          </h5>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="ml-2 h-6 w-6 p-0 text-gray-400 hover:text-blue-600"
-                            asChild
-                          >
-                            <a href={result.url} target="_blank" rel="noopener noreferrer">
-                              <ExternalLink className="h-3 w-3" />
-                            </a>
-                          </Button>
-                        </div>
-                        
-                        <div className="space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-lg font-bold text-green-600">
-                              ${result.price.toFixed(2)}
-                            </span>
-                            <div className="flex items-center space-x-2">
-                              {result.type && (
-                                <Badge variant="outline" className="text-xs capitalize">
-                                  {result.type}
-                                </Badge>
-                              )}
-                              <Badge variant="secondary" className="text-xs">
-                                {result.source}
-                              </Badge>
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center space-x-3 text-xs text-gray-500">
-                            <div className="flex items-center space-x-1">
-                              <Calendar className="h-3 w-3" />
-                              <span>{new Date(result.date).toLocaleDateString()}</span>
-                            </div>
-                            <div className="flex items-center space-x-1">
-                              <Building className="h-3 w-3" />
-                              <span>{result.source}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
+// ... inside ResultsDisplay component
+<div className="space-y-3 max-h-96 overflow-y-auto">
+  {results.map((result) => (
+    <div
+      key={result.id} // Use the unique ID for the key
+      className={`p-4 rounded-lg border transition-all ${
+        result.selected 
+          ? 'border-blue-300 bg-blue-50' 
+          : 'border-gray-200 bg-white opacity-75'
+      }`}
+    >
+      <div className="flex items-start space-x-3">
+        <Checkbox
+          checked={result.selected}
+          onCheckedChange={() => onResultToggle(result.id)}
+          className="mt-1"
+        />
+        
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between mb-2">
+            <h5 className="text-sm font-medium text-gray-800 line-clamp-2">
+              {result.title}
+            </h5>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-2 h-6 w-6 p-0 text-gray-400 hover:text-blue-600"
+              asChild
+            >
+              <a href={result.url} target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </Button>
+          </div>
+          
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-lg font-bold text-green-600">
+                ${result.price.toFixed(2)}
+              </span>
+              <div className="flex items-center space-x-2">
+                {result.type && (
+                  <Badge variant="outline" className="text-xs capitalize">
+                    {result.type}
+                  </Badge>
+                )}
+                <Badge variant="secondary" className="text-xs">
+                  {result.source}
+                </Badge>
               </div>
             </div>
+            
+            <div className="flex items-center space-x-3 text-xs text-gray-500">
+              <div className="flex items-center space-x-1">
+                <Calendar className="h-3 w-3" />
+                <span>{new Date(result.date).toLocaleDateString()}</span> {/* Standardize date format for display */}
+              </div>
+              <div className="flex items-center space-x-1">
+                <Building className="h-3 w-3" />
+                <span>{result.source}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  ))}
+</div>
 
             {selectedResults.length === 0 && (
               <div className="text-center p-4 bg-amber-50 rounded-lg border border-amber-200">
