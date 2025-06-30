@@ -1,5 +1,3 @@
-import { ConfigurationError } from './errors.ts';
-
 // **CENTRALIZED CORS HEADERS**
 // Define CORS headers in one place to ensure consistency across all responses.
 export const corsHeaders = {
