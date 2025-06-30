@@ -1,4 +1,3 @@
-
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -106,14 +105,37 @@ const Index = () => {
           description: `Found ${data.salesResults.length} comparable sales. Estimated value: $${data.estimatedValue.toFixed(2)}`,
         });
       } else {
-        throw new Error(data.error || 'Failed to estimate card value');
+        // Handle specific error cases with better messaging
+        if (data.traceId === 'vision-api-disabled') {
+          toast({
+            title: "Google Vision API Not Enabled",
+            description: data.details,
+            variant: "destructive"
+          });
+          
+          // Automatically switch to description tab as suggested
+          setActiveTab("description");
+        } else {
+          throw new Error(data.error || 'Failed to estimate card value');
+        }
       }
 
     } catch (error) {
       console.error('Error estimating card value:', error);
+      
+      let errorMessage = "Failed to estimate card value. Please try again.";
+      let errorTitle = "Error";
+      
+      // Check if it's a vision API error
+      if (error.message && error.message.includes('Vision API')) {
+        errorTitle = "Vision API Issue";
+        errorMessage = "There's an issue with the image processing. Please try using the card description instead.";
+        setActiveTab("description"); // Switch to description tab
+      }
+      
       toast({
-        title: "Error",
-        description: error.message || "Failed to estimate card value. Please try again.",
+        title: errorTitle,
+        description: errorMessage,
         variant: "destructive"
       });
     } finally {

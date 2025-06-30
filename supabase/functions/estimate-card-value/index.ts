@@ -1,4 +1,3 @@
-
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
@@ -93,11 +92,30 @@ serve(async (req) => {
         console.log('Extracted text:', cardInfo);
       } catch (error) {
         console.error('Image processing failed:', error);
+        
+        // If Google Vision API is not enabled, provide helpful error message
+        if (error.message.includes('Cloud Vision API has not been used') || error.message.includes('SERVICE_DISABLED')) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: 'Google Vision API not enabled',
+              details: 'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it at: https://console.developers.google.com/apis/api/vision.googleapis.com/overview or use the card description option instead.',
+              suggestion: 'Try using the "Describe Card" tab instead of uploading an image.',
+              traceId: 'vision-api-disabled'
+            }),
+            {
+              status: 400,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            }
+          );
+        }
+        
         return new Response(
           JSON.stringify({
             success: false,
             error: 'Image processing failed',
             details: error.message,
+            suggestion: 'Try using the "Describe Card" tab instead of uploading an image.',
             traceId: 'image-processing-error'
           }),
           {
@@ -224,7 +242,7 @@ async function extractTextFromImage(base64Image: string): Promise<string> {
   console.log('Google API key found:', !!googleApiKey);
   
   if (!googleApiKey) {
-    throw new Error('Google API key not found in environment variables');
+    throw new Error('Google API key not found in environment variables. Please set the "Google API Key" secret in your Supabase project settings.');
   }
 
   try {
@@ -262,11 +280,22 @@ async function extractTextFromImage(base64Image: string): Promise<string> {
     if (!response.ok) {
       const errorText = await response.text();
       console.error('Google Vision API error response:', errorText);
+      
+      // Parse the error to provide more specific messages
+      try {
+        const errorData = JSON.parse(errorText);
+        if (errorData.error?.message?.includes('Cloud Vision API has not been used')) {
+          throw new Error('Cloud Vision API has not been used in project before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/vision.googleapis.com/overview then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.');
+        }
+      } catch (parseError) {
+        // If we can't parse the error, use the original message
+      }
+      
       throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
-    console.log('Google Vision API response:', JSON.stringify(data, null, 2));
+    console.log('Google Vision API response data keys:', Object.keys(data));
     
     if (data.responses?.[0]?.textAnnotations?.[0]?.description) {
       return data.responses[0].textAnnotations[0].description;
@@ -338,7 +367,7 @@ async function parseCardInformation(rawText: string): Promise<string> {
     }
 
     const data = await response.json();
-    console.log('OpenAI API response:', JSON.stringify(data, null, 2));
+    console.log('OpenAI API response data keys:', Object.keys(data));
     
     if (data.choices?.[0]?.message?.content) {
       return data.choices[0].message.content;
