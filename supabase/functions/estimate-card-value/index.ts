@@ -1,8 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { corsHeaders } from './config.ts';
+import { config, corsHeaders } from './config.ts';
 import { Logger } from './logger.ts';
 import { extractCardInfoFromImage, parseCardDescription } from './vision-parser.ts';
-import { CardEstimationError, handleError } from './errors.ts';
+import { CardEstimationError, handleError, CardProcessingError } from './errors.ts';
 import { fetchProductionComps } from './sales-scrapers.ts';
 
 interface EstimationRequest {
@@ -22,6 +22,12 @@ serve(async (req) => {
   let traceId = '';
 
   try {
+    // **CRITICAL FIX: Validate config inside the handler**
+    // This ensures the function doesn't crash on startup if keys are missing.
+    if (!config.supabaseUrl || !config.supabaseAnonKey) {
+        throw new CardProcessingError("Server is not configured correctly (Supabase details missing).", "CONFIG_ERROR", 500);
+    }
+
     const requestBody: EstimationRequest = await req.json();
     traceId = `est_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
@@ -35,6 +41,10 @@ serve(async (req) => {
     if (requestBody.description) {
         cardKeywords = await parseCardDescription(requestBody.description);
     } else if (requestBody.image) {
+        // Also check for Vision API key here, inside the handler
+        if (!config.openaiApiKey) {
+            throw new CardProcessingError("Image processing is not available (server configuration missing). Please use the description tab.", "CONFIG_ERROR", 500);
+        }
         cardKeywords = await extractCardInfoFromImage(requestBody.image);
     } else {
         throw new CardEstimationError('No input provided.', 'INVALID_INPUT', traceId);
