@@ -14,34 +14,14 @@ export interface AppConfig {
   supabaseAnonKey: string;
 }
 
+// This function now safely loads variables without throwing errors at the top level.
 export function loadConfiguration(): AppConfig {
-  const config: AppConfig = {
+  return {
     openaiApiKey: Deno.env.get("OPENAI_API_KEY") || "",
     ebayAppId: Deno.env.get("EBAY_APP_ID") || "",
     supabaseUrl: Deno.env.get("SUPABASE_URL") || "",
     supabaseAnonKey: Deno.env.get("SUPABASE_ANON_KEY") || "",
   };
-
-  // The function will fail gracefully if keys are missing, but we'll log warnings.
-  if (!config.supabaseUrl || !config.supabaseAnonKey) {
-    console.error("CRITICAL: Missing Supabase configuration.");
-    // Throw a standard Error, which will be caught by the main handler.
-    throw new Error("Missing required Supabase configuration. Check environment variables.");
-  }
-
-  if (!config.openaiApiKey) {
-    console.warn('⚠️ OpenAI API key not configured - AI features will be disabled.');
-  } else {
-    console.log('✅ OpenAI API configured successfully');
-  }
-
-  if (!config.ebayAppId) {
-    console.warn('⚠️ eBay App ID not configured - eBay Finding API will be disabled.');
-  } else {
-    console.log('✅ eBay Finding API configured successfully');
-  }
-
-  return config;
 }
 
 export const config = loadConfiguration();
