@@ -1,4 +1,3 @@
-
 import { memo } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,4 +41,5 @@ const CardDescriptionComponent = ({ description, onDescriptionChange }: CardDesc
   );
 };
 
-export const CardDescription = memo(CardDescriptionComponent);
+export const CardDescriptionComponent = memo(CardDescriptionComponent);
+xport const CardDescription = memo(CardDescriptionComponent);
