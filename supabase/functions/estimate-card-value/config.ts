@@ -1,5 +1,3 @@
-import { ConfigurationError } from './errors.ts';
-
 // **CENTRALIZED CORS HEADERS**
 // This is the definitive set of headers to allow requests from your web app.
 export const corsHeaders = {
@@ -27,7 +25,8 @@ export function loadConfiguration(): AppConfig {
   // The function will fail gracefully if keys are missing, but we'll log warnings.
   if (!config.supabaseUrl || !config.supabaseAnonKey) {
     console.error("CRITICAL: Missing Supabase configuration.");
-    throw new ConfigurationError("Missing required Supabase configuration");
+    // Throw a standard Error, which will be caught by the main handler.
+    throw new Error("Missing required Supabase configuration. Check environment variables.");
   }
 
   if (!config.openaiApiKey) {
