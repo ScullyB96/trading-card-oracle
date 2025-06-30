@@ -7,6 +7,8 @@ import { CardDescription } from "@/components/CardDescription";
 import { SourceSelection } from "@/components/SourceSelection";
 import { CompLogicSelection } from "@/components/CompLogicSelection";
 import { ResultsDisplay, SalesResult } from "@/components/ResultsDisplay";
+import { EstimationSummary } from "@/components/EstimationSummary";
+import { ArchitectureStatus } from "@/components/ArchitectureStatus";
 import { Sparkles, TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
@@ -32,6 +34,7 @@ const Index = () => {
   const [logicUsed, setLogicUsed] = useState<string>("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [showExactMatchWarning, setShowExactMatchWarning] = useState(false);
+  const [estimationData, setEstimationData] = useState<any>(null);
 
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -40,165 +43,6 @@ const Index = () => {
       reader.onload = () => resolve(reader.result as string);
       reader.onerror = error => reject(error);
     });
-  };
-
-  const handleSubmit = async () => {
-    if (!uploadedImage && !cardDescription.trim()) {
-      toast({
-        title: "Input Required",
-        description: "Please upload an image or provide a card description.",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    if (selectedSources.length === 0) {
-      toast({
-        title: "Sources Required",
-        description: "Please select at least one data source.",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    setIsLoading(true);
-    setShowExactMatchWarning(false);
-    console.log("Submitting estimation request:", {
-      hasImage: !!uploadedImage,
-      description: cardDescription,
-      sources: selectedSources,
-      compLogic: compLogic
-    });
-
-    try {
-      let requestData: any = {
-        sources: selectedSources,
-        compLogic: compLogic
-      };
-
-      if (activeTab === "image" && uploadedImage) {
-        const base64Image = await fileToBase64(uploadedImage);
-        requestData.image = base64Image;
-      } else if (activeTab === "description" && cardDescription.trim()) {
-        requestData.description = cardDescription.trim();
-      }
-
-      const { data, error } = await supabase.functions.invoke('estimate-card-value', {
-        body: requestData
-      });
-
-      if (error) {
-        console.error('Supabase function error:', error);
-        throw error;
-      }
-
-      if (data.success) {
-        // Safely handle the comps array from backend
-        const comps = data.comps || data.salesResults || [];
-        
-        // Check if we have the required data
-        if (!data.estimatedValue && (!comps || !Array.isArray(comps) || comps.length === 0)) {
-          toast({
-            title: "No Results Found",
-            description: "No comps found, please try another image or description.",
-            variant: "destructive"
-          });
-          setResults([]);
-          setEstimatedValue(null);
-          setLogicUsed("");
-          setWarnings([]);
-          return;
-        }
-
-        // Convert comps to SalesResult format with safety checks
-        const salesWithSelection = Array.isArray(comps) ? comps.map((result: any, index: number) => ({
-          id: result.id || `comp_${Date.now()}_${index}`,
-          title: result.title || 'Unknown Card',
-          price: typeof result.price === 'number' ? result.price : 0,
-          date: result.date || new Date().toISOString().split('T')[0],
-          source: result.source || 'Unknown',
-          url: result.url || '#',
-          thumbnail: result.image || result.thumbnail,
-          selected: true,
-          type: result.type,
-          matchScore: result.matchScore || 0
-        })) : [];
-        
-        setResults(salesWithSelection);
-        
-        // Parse estimated value safely
-        const estimatedVal = typeof data.estimatedValue === 'string' 
-          ? parseFloat(data.estimatedValue.replace('$', '')) 
-          : (typeof data.estimatedValue === 'number' ? data.estimatedValue : null);
-        
-        setEstimatedValue(estimatedVal);
-        setLogicUsed(data.logicUsed || compLogic);
-        setWarnings(data.warnings || []);
-        
-        // Show exact match warning if needed
-        if (data.exactMatchFound === false) {
-          setShowExactMatchWarning(true);
-        }
-        
-        const resultCount = salesWithSelection.length;
-        const estimatedValueStr = estimatedVal ? `$${estimatedVal.toFixed(2)}` : 'N/A';
-        
-        toast({
-          title: "Analysis Complete",
-          description: resultCount > 0 
-            ? `Found ${resultCount} comparable sales. Estimated value: ${estimatedValueStr}`
-            : "Analysis complete, but no comparable sales found.",
-        });
-      } else {
-        console.error('Function returned error:', data);
-        
-        if (data.traceId === 'billing-disabled') {
-          toast({
-            title: "Google Vision API Billing Required",
-            description: "Google Vision API requires billing to be enabled. Please switch to the 'Describe Card' tab.",
-            variant: "destructive"
-          });
-          setActiveTab("description");
-        } else if (data.traceId === 'vision-api-disabled') {
-          toast({
-            title: "Google Vision API Not Enabled",
-            description: data.details || "Please use the card description instead.",
-            variant: "destructive"
-          });
-          setActiveTab("description");
-        } else {
-          toast({
-            title: data.error || "Error",
-            description: data.details || "Failed to analyze the card. Please try again.",
-            variant: "destructive"
-          });
-        }
-      }
-
-    } catch (error) {
-      console.error('Error estimating card value:', error);
-      
-      let errorMessage = "Failed to estimate card value. Please try again.";
-      let errorTitle = "Error";
-      
-      if (error.name === 'FunctionsHttpError') {
-        errorTitle = "Service Error";
-        errorMessage = "There was an issue processing your request. Please try again or use the card description instead.";
-        
-        if (activeTab === "image") {
-          setActiveTab("description");
-          errorMessage = "There was an issue processing the image. Please try using the card description instead.";
-        }
-      }
-      
-      toast({
-        title: errorTitle,
-        description: errorMessage,
-        variant: "destructive"
-      });
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const calculateEstimatedValue = (selectedResults: SalesResult[], logic: string): number => {
@@ -272,6 +116,172 @@ const Index = () => {
     }
   };
 
+  const handleSubmit = async () => {
+    if (!uploadedImage && !cardDescription.trim()) {
+      toast({
+        title: "Input Required",
+        description: "Please upload an image or provide a card description.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (selectedSources.length === 0) {
+      toast({
+        title: "Sources Required",
+        description: "Please select at least one data source.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsLoading(true);
+    setShowExactMatchWarning(false);
+    setEstimationData(null);
+    console.log("Submitting estimation request:", {
+      hasImage: !!uploadedImage,
+      description: cardDescription,
+      sources: selectedSources,
+      compLogic: compLogic
+    });
+
+    try {
+      let requestData: any = {
+        sources: selectedSources,
+        compLogic: compLogic
+      };
+
+      if (activeTab === "image" && uploadedImage) {
+        const base64Image = await fileToBase64(uploadedImage);
+        requestData.image = base64Image;
+      } else if (activeTab === "description" && cardDescription.trim()) {
+        requestData.description = cardDescription.trim();
+      }
+
+      const { data, error } = await supabase.functions.invoke('estimate-card-value', {
+        body: requestData
+      });
+
+      if (error) {
+        console.error('Supabase function error:', error);
+        throw error;
+      }
+
+      if (data.success) {
+        // Store complete estimation data for enhanced UI
+        setEstimationData(data);
+        
+        // Safely handle the comps array from backend
+        const comps = data.comps || data.salesResults || [];
+        
+        // Check if we have the required data
+        if (!data.estimatedValue && (!comps || !Array.isArray(comps) || comps.length === 0)) {
+          toast({
+            title: "No Results Found",
+            description: "No comps found, please try another image or description.",
+            variant: "destructive"
+          });
+          setResults([]);
+          setEstimatedValue(null);
+          setLogicUsed("");
+          setWarnings([]);
+          return;
+        }
+
+        // Convert comps to SalesResult format with safety checks
+        const salesWithSelection = Array.isArray(comps) ? comps.map((result: any, index: number) => ({
+          id: result.id || `comp_${Date.now()}_${index}`,
+          title: result.title || 'Unknown Card',
+          price: typeof result.price === 'number' ? result.price : 0,
+          date: result.date || new Date().toISOString().split('T')[0],
+          source: result.source || 'Unknown',
+          url: result.url || '#',
+          thumbnail: result.image || result.thumbnail,
+          selected: true,
+          type: result.type,
+          matchScore: result.matchScore || 0
+        })) : [];
+        
+        setResults(salesWithSelection);
+        
+        // Parse estimated value safely
+        const estimatedVal = typeof data.estimatedValue === 'string' 
+          ? parseFloat(data.estimatedValue.replace('$', '')) 
+          : (typeof data.estimatedValue === 'number' ? data.estimatedValue : null);
+        
+        setEstimatedValue(estimatedVal);
+        setLogicUsed(data.logicUsed || compLogic);
+        setWarnings(data.warnings || []);
+        
+        // Show exact match warning if needed
+        if (data.exactMatchFound === false) {
+          setShowExactMatchWarning(true);
+        }
+        
+        const resultCount = salesWithSelection.length;
+        const estimatedValueStr = estimatedVal ? `$${estimatedVal.toFixed(2)}` : 'N/A';
+        
+        toast({
+          title: "NEW ARCHITECTURE Analysis Complete",
+          description: resultCount > 0 
+            ? `Found ${resultCount} comparable sales. Estimated value: ${estimatedValueStr}`
+            : "Analysis complete, but no comparable sales found.",
+        });
+      } else {
+        console.error('Function returned error:', data);
+        
+        // Store error data for architecture status display
+        setEstimationData(data);
+        
+        if (data.traceId === 'billing-disabled') {
+          toast({
+            title: "Google Vision API Billing Required",
+            description: "Google Vision API requires billing to be enabled. Please switch to the 'Describe Card' tab.",
+            variant: "destructive"
+          });
+          setActiveTab("description");
+        } else if (data.traceId === 'vision-api-disabled') {
+          toast({
+            title: "Google Vision API Not Enabled",
+            description: data.details || "Please use the card description instead.",
+            variant: "destructive"
+          });
+          setActiveTab("description");
+        } else {
+          toast({
+            title: data.error || "Error",
+            description: data.details || "Failed to analyze the card. Please try again.",
+            variant: "destructive"
+          });
+        }
+      }
+
+    } catch (error) {
+      console.error('Error estimating card value:', error);
+      
+      let errorMessage = "Failed to estimate card value. Please try again.";
+      let errorTitle = "Error";
+      
+      if (error.name === 'FunctionsHttpError') {
+        errorTitle = "Service Error";
+        errorMessage = "There was an issue processing your request. Please try again or use the card description instead.";
+        
+        if (activeTab === "image") {
+          setActiveTab("description");
+          errorMessage = "There was an issue processing the image. Please try using the card description instead.";
+        }
+      }
+      
+      toast({
+        title: errorTitle,
+        description: errorMessage,
+        variant: "destructive"
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const canSubmit = (uploadedImage && activeTab === "image") || 
                    (cardDescription.trim() && activeTab === "description");
 
@@ -284,23 +294,34 @@ const Index = () => {
             <div className="p-2 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg">
               <Sparkles className="h-6 w-6 text-white" />
             </div>
-            <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-              Trading Card Oracle
-            </h1>
+            <div className="text-center">
+              <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+                Trading Card Oracle
+              </h1>
+              <p className="text-xs text-blue-600 font-medium">Powered by Discover-then-Scrape Architecture v2.0</p>
+            </div>
           </div>
           <p className="text-center text-gray-600 mt-2">
-            Get instant value estimates for your trading cards
+            Get instant value estimates for your trading cards using advanced discovery technology
           </p>
         </div>
       </div>
 
-      <div className="container mx-auto px-4 py-8 max-w-4xl">
+      <div className="container mx-auto px-4 py-8 max-w-6xl">
+        {/* Architecture Status */}
+        <ArchitectureStatus 
+          isLoading={isLoading}
+          errors={estimationData?.errors}
+          warnings={warnings}
+          productionResponse={estimationData?.productionResponse}
+        />
+
         {/* Exact Match Warning Banner */}
         {showExactMatchWarning && (
           <Alert className="mb-4 border-blue-200 bg-blue-50">
             <Info className="h-4 w-4 text-blue-600" />
             <AlertDescription className="text-blue-800">
-              We couldn't find an exact match. Here are some similar cards.
+              We couldn't find an exact match. Here are some similar cards using our enhanced discovery system.
             </AlertDescription>
           </Alert>
         )}
@@ -369,13 +390,28 @@ const Index = () => {
                 {isLoading ? (
                   <div className="flex items-center space-x-2">
                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                    <span>Analyzing...</span>
+                    <span>Analyzing with NEW ARCHITECTURE...</span>
                   </div>
                 ) : (
                   "Estimate Value"
                 )}
               </Button>
             </div>
+
+            {/* Enhanced Estimation Summary */}
+            {estimationData && estimatedValue && (
+              <EstimationSummary
+                estimatedValue={estimatedValue}
+                confidence={estimationData.confidence || 0}
+                methodology={estimationData.methodology || 'Standard Analysis'}
+                logicUsed={logicUsed}
+                exactMatchFound={estimationData.exactMatchFound || false}
+                matchMessage={estimationData.matchMessage}
+                dataPoints={results.length}
+                priceRange={estimationData.priceRange}
+                productionResponse={estimationData.productionResponse}
+              />
+            )}
           </div>
 
           {/* Results Section */}
