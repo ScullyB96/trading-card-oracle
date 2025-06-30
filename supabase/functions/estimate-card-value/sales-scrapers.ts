@@ -70,7 +70,7 @@ export async function fetchProductionComps(
   const logger = new Logger(traceId);
   const startTime = Date.now();
   
-  logger.info('Starting production scraping', {
+  logger.info('Starting resilient production scraping', {
     operation: 'fetchProductionComps',
     sources,
     compLogic,
@@ -83,24 +83,17 @@ export async function fetchProductionComps(
   });
 
   try {
-    // Validate sources
-    const validSources = validateSources(sources);
-    if (validSources.length === 0) {
-      throw new ScrapingError('No valid sources selected', 'validation');
-    }
-
-    // Build optimized search queries
-    const searchQueries = buildOptimizedSearchQueries(query, logger);
+    // Validate sources with fallback
+    const validSources = validateSourcesWithFallback(sources, logger);
     
-    // Execute scraping with timeout protection
-    const scrapingResult = await withTimeout(
-      executeScrapingStrategy(searchQueries, validSources, logger),
-      config.timeout.scraping,
-      'scraping'
-    );
-
-    // Process and calculate results
-    const result = await processScrapingResults(scrapingResult, query, compLogic, logger);
+    // Build multiple search strategies
+    const searchStrategies = buildSearchStrategies(query, logger);
+    
+    // Execute resilient scraping
+    const scrapingResult = await executeResilientScraping(searchStrategies, validSources, logger);
+    
+    // Process results with error tolerance
+    const result = await processResultsWithFallbacks(scrapingResult, query, compLogic, logger);
     
     const processingTime = Date.now() - startTime;
     logger.performance('fetchProductionComps', processingTime);
@@ -108,7 +101,7 @@ export async function fetchProductionComps(
     return {
       ...result,
       debug: {
-        attemptedQueries: searchQueries,
+        attemptedQueries: searchStrategies,
         rawResultCounts: scrapingResult.rawResultCounts,
         totalProcessingTime: processingTime,
         traceId
@@ -117,29 +110,36 @@ export async function fetchProductionComps(
 
   } catch (error) {
     const processingTime = Date.now() - startTime;
-    logger.error('Production scraping failed', error, { processingTime });
+    logger.error('Production scraping failed completely', error, { processingTime });
     
-    return createErrorResponse(
-      error instanceof ScrapingError ? error.message : 'Scraping operation failed',
+    return createRobustErrorResponse(
+      'All scraping strategies failed',
       compLogic,
       processingTime,
       [],
       {},
-      [{ source: 'System', message: error.message }],
+      [{ source: 'System', message: `Complete failure: ${error.message}` }],
       traceId
     );
   }
 }
 
-function validateSources(sources: string[]): string[] {
+function validateSourcesWithFallback(sources: string[], logger: Logger): string[] {
   const validSourceList = ['ebay', '130point'];
-  return sources.filter(s => validSourceList.includes(s));
+  const validSources = sources.filter(s => validSourceList.includes(s));
+  
+  if (validSources.length === 0) {
+    logger.warn('No valid sources provided, using all available sources as fallback');
+    return validSourceList; // Use all sources as fallback
+  }
+  
+  return validSources;
 }
 
-function buildOptimizedSearchQueries(query: SearchQuery, logger: Logger): string[] {
-  logger.info('Building optimized search queries', { operation: 'buildOptimizedSearchQueries' });
+function buildSearchStrategies(query: SearchQuery, logger: Logger): string[] {
+  logger.info('Building resilient search strategies', { operation: 'buildSearchStrategies' });
   
-  const queries: string[] = [];
+  const strategies: string[] = [];
   const parts = {
     year: query.year && query.year !== 'unknown' ? query.year.trim() : '',
     player: query.player && query.player !== 'unknown' ? query.player.trim() : '',
@@ -149,200 +149,297 @@ function buildOptimizedSearchQueries(query: SearchQuery, logger: Logger): string
     sport: query.sport && query.sport !== 'unknown' && query.sport !== 'other' ? query.sport.trim() : ''
   };
 
-  // High-precision search (full details)
+  // Strategy 1: Full precision search
   if (parts.year && parts.player && parts.set && parts.cardNumber) {
-    queries.push(`${parts.year} ${parts.set} ${parts.player} #${parts.cardNumber}`);
+    strategies.push(`${parts.year} ${parts.set} ${parts.player} #${parts.cardNumber}`);
   }
 
-  // Medium-precision search (no card number)
+  // Strategy 2: High precision without card number
   if (parts.year && parts.player && parts.set) {
-    queries.push(`${parts.year} ${parts.set} ${parts.player} Rookie`);
+    strategies.push(`${parts.year} ${parts.set} ${parts.player} Rookie`);
+    strategies.push(`${parts.year} ${parts.set} ${parts.player} RC`);
   }
 
-  // Player-focused search
+  // Strategy 3: Player and year focused
   if (parts.player && parts.year) {
-    queries.push(`${parts.player} ${parts.year} Prizm RC`);
+    strategies.push(`${parts.player} ${parts.year} Rookie Card`);
+    strategies.push(`${parts.player} ${parts.year} RC`);
   }
 
-  // Fallback search
+  // Strategy 4: Brand-specific searches
+  if (parts.player && parts.year) {
+    const popularSets = ['Prizm', 'Select', 'Donruss', 'Optic', 'Chronicles'];
+    popularSets.forEach(set => {
+      strategies.push(`${parts.player} ${parts.year} ${set} RC`);
+    });
+  }
+
+  // Strategy 5: Broad player search
   if (parts.player) {
-    queries.push(`${parts.player} Rookie Card`);
+    strategies.push(`${parts.player} Rookie Card`);
+    strategies.push(`${parts.player} RC`);
   }
 
-  const optimizedQueries = queries
-    .filter(q => q.length > 8)
-    .filter(q => !q.includes('unknown'))
-    .slice(0, config.limits.maxQueries);
+  // Strategy 6: Sport-specific fallback
+  if (parts.player && parts.sport) {
+    strategies.push(`${parts.player} ${parts.sport} Rookie`);
+  }
 
-  logger.info('Search queries built', { 
-    operation: 'buildOptimizedSearchQueries',
-    queryCount: optimizedQueries.length,
-    queries: optimizedQueries
+  const finalStrategies = strategies
+    .filter(s => s.length > 8)
+    .filter(s => !s.includes('unknown'))
+    .slice(0, Math.max(6, config.limits.maxQueries)); // Ensure we have enough strategies
+
+  logger.info('Search strategies built', { 
+    operation: 'buildSearchStrategies',
+    strategyCount: finalStrategies.length,
+    strategies: finalStrategies
   });
 
-  return optimizedQueries;
+  return finalStrategies;
 }
 
-interface ScrapingResult {
+interface ResilientScrapingResult {
   comps: NormalizedComp[];
   errors: Array<{ source: string; message: string }>;
   rawResultCounts: { [key: string]: number };
+  successfulSources: string[];
 }
 
-async function executeScrapingStrategy(
-  searchQueries: string[],
+async function executeResilientScraping(
+  searchStrategies: string[],
   validSources: string[],
   logger: Logger
-): Promise<ScrapingResult> {
-  logger.info('Executing scraping strategy', { 
-    operation: 'executeScrapingStrategy',
-    queryCount: searchQueries.length,
+): Promise<ResilientScrapingResult> {
+  logger.info('Executing resilient scraping', { 
+    operation: 'executeResilientScraping',
+    strategyCount: searchStrategies.length,
     sources: validSources
   });
 
   let allComps: NormalizedComp[] = [];
   let allErrors: Array<{ source: string; message: string }> = [];
   const rawResultCounts: { [key: string]: number } = {};
+  const successfulSources: string[] = [];
 
-  for (const searchQuery of searchQueries) {
+  // Try each search strategy until we get sufficient results
+  for (const [index, searchQuery] of searchStrategies.entries()) {
     try {
-      const queryResult = await processSearchQuery(searchQuery, validSources, logger);
+      const strategyResult = await processSearchQueryResilient(searchQuery, validSources, logger);
       
-      allComps = allComps.concat(queryResult.comps);
-      allErrors = allErrors.concat(queryResult.errors);
-      Object.assign(rawResultCounts, queryResult.rawResultCounts);
+      allComps = allComps.concat(strategyResult.comps);
+      allErrors = allErrors.concat(strategyResult.errors);
+      Object.assign(rawResultCounts, strategyResult.rawResultCounts);
       
-      // Early exit if we have sufficient data
-      if (allComps.length >= 5) {
-        logger.info('Sufficient data found, stopping search', {
-          operation: 'executeScrapingStrategy',
+      // Track successful sources
+      strategyResult.successfulSources.forEach(source => {
+        if (!successfulSources.includes(source)) {
+          successfulSources.push(source);
+        }
+      });
+      
+      logger.info(`Strategy ${index + 1} completed`, {
+        operation: 'executeResilientScraping',
+        query: searchQuery,
+        compsFound: strategyResult.comps.length,
+        totalComps: allComps.length
+      });
+      
+      // Early exit if we have sufficient high-quality data
+      if (allComps.length >= 8 && successfulSources.length >= 2) {
+        logger.info('Sufficient high-quality data found, stopping search', {
+          operation: 'executeResilientScraping',
           compCount: allComps.length,
-          query: searchQuery
+          sources: successfulSources
         });
         break;
       }
       
+      // Continue if we still need more data
+      if (allComps.length >= 3 && index >= 2) {
+        logger.info('Minimum data threshold met, continuing for better results', {
+          operation: 'executeResilientScraping',
+          compCount: allComps.length
+        });
+      }
+      
     } catch (error) {
-      logger.error('Search query failed', error, { 
-        operation: 'executeScrapingStrategy',
+      logger.error('Search strategy failed', error, { 
+        operation: 'executeResilientScraping',
+        strategy: index + 1,
         query: searchQuery
       });
       
       allErrors.push({
-        source: 'System',
-        message: `Query failed: ${error.message}`
+        source: 'Search Strategy',
+        message: `Strategy ${index + 1} failed: ${error.message}`
       });
     }
   }
 
   // Deduplicate results
-  const uniqueComps = deduplicateComps(allComps, logger);
+  const uniqueComps = deduplicateCompsResilient(allComps, logger);
   
   return {
     comps: uniqueComps,
     errors: allErrors,
-    rawResultCounts
+    rawResultCounts,
+    successfulSources
   };
 }
 
-async function processSearchQuery(
+async function processSearchQueryResilient(
   searchQuery: string,
   validSources: string[],
   logger: Logger
-): Promise<ScrapingResult> {
-  const fetchPromises: Promise<any>[] = [];
+): Promise<{ comps: NormalizedComp[]; errors: Array<{ source: string; message: string }>; rawResultCounts: { [key: string]: number }; successfulSources: string[] }> {
   
-  if (validSources.includes('ebay')) {
-    fetchPromises.push(
-      rateLimitedFetch(() => fetchEbayComps(searchQuery))
-        .catch(error => ({ results: [], error: { source: 'eBay', message: error.message } }))
-    );
-  }
+  const errors: Array<{ source: string; message: string }> = [];
+  const rawResultCounts: { [key: string]: number } = {};
+  const successfulSources: string[] = [];
   
-  if (validSources.includes('130point')) {
-    fetchPromises.push(
-      rateLimitedFetch(() => fetch130PointComps(searchQuery))
-        .catch(error => ({ results: [], error: { source: '130Point', message: error.message } }))
-    );
-  }
-
-  const results = await Promise.allSettled(fetchPromises);
-  
+  // Scrape eBay with resilient error handling
   let ebayResult = { results: [], error: undefined };
-  let point130Result = { results: [], error: undefined };
-  
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      if (validSources.includes('ebay') && index === 0) {
-        ebayResult = result.value;
-      } else if (validSources.includes('130point')) {
-        const point130Index = validSources.includes('ebay') ? 1 : 0;
-        if (index === point130Index) {
-          point130Result = result.value;
-        }
+  if (validSources.includes('ebay')) {
+    try {
+      ebayResult = await rateLimitedFetch(() => 
+        withTimeout(fetchEbayComps(searchQuery), config.timeout.request, 'eBay scraping')
+      );
+      
+      if (ebayResult.results.length > 0) {
+        successfulSources.push('ebay');
       }
+      
+      if (ebayResult.error) {
+        errors.push(ebayResult.error);
+      }
+      
+    } catch (error) {
+      logger.error('eBay scraping failed', error, { query: searchQuery });
+      errors.push({ source: 'eBay', message: `Scraping failed: ${error.message}` });
+      ebayResult = { results: [], error: { source: 'eBay', message: error.message } };
     }
-  });
+  }
+  
+  // Scrape 130Point with resilient error handling
+  let point130Result = { results: [], error: undefined };
+  if (validSources.includes('130point')) {
+    try {
+      point130Result = await rateLimitedFetch(() => 
+        withTimeout(fetch130PointComps(searchQuery), config.timeout.request, '130Point scraping')
+      );
+      
+      if (point130Result.results.length > 0) {
+        successfulSources.push('130point');
+      }
+      
+      if (point130Result.error) {
+        errors.push(point130Result.error);
+      }
+      
+    } catch (error) {
+      logger.error('130Point scraping failed', error, { query: searchQuery });
+      errors.push({ source: '130Point', message: `Scraping failed: ${error.message}` });
+      point130Result = { results: [], error: { source: '130Point', message: error.message } };
+    }
+  }
 
-  const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+  // Record counts
+  rawResultCounts[`eBay_${searchQuery}`] = ebayResult.results.length;
+  rawResultCounts[`130Point_${searchQuery}`] = point130Result.results.length;
+
+  // Combine and normalize with error tolerance
+  let normalizationResult;
+  try {
+    normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+  } catch (error) {
+    logger.error('Normalization failed', error, { query: searchQuery });
+    errors.push({ source: 'Normalizer', message: `Data normalization failed: ${error.message}` });
+    
+    // Return whatever we can salvage
+    normalizationResult = {
+      comps: [],
+      errors: [...errors, { source: 'Normalizer', message: 'Normalization failed, no data available' }]
+    };
+  }
   
   return {
-    comps: normalizationResult.comps,
-    errors: normalizationResult.errors,
-    rawResultCounts: {
-      [`eBay_${searchQuery}`]: ebayResult.results.length,
-      [`130Point_${searchQuery}`]: point130Result.results.length
-    }
+    comps: normalizationResult.comps || [],
+    errors: [...errors, ...(normalizationResult.errors || [])],
+    rawResultCounts,
+    successfulSources
   };
 }
 
-function deduplicateComps(comps: NormalizedComp[], logger: Logger): NormalizedComp[] {
-  const seen = new Map<string, NormalizedComp>();
-  
-  for (const comp of comps) {
-    const signature = createCompSignature(comp);
-    const existing = seen.get(signature);
+function deduplicateCompsResilient(comps: NormalizedComp[], logger: Logger): NormalizedComp[] {
+  try {
+    const seen = new Map<string, NormalizedComp>();
     
-    if (!existing || new Date(comp.date) > new Date(existing.date)) {
-      seen.set(signature, comp);
+    for (const comp of comps) {
+      try {
+        const signature = createCompSignatureResilient(comp);
+        const existing = seen.get(signature);
+        
+        if (!existing || new Date(comp.date) > new Date(existing.date)) {
+          seen.set(signature, comp);
+        }
+      } catch (error) {
+        logger.warn('Failed to process comp for deduplication', { error: error.message, comp: comp.title });
+        // Continue processing other comps
+      }
     }
+    
+    const dedupedResults = Array.from(seen.values())
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    
+    logger.info('Resilient deduplication complete', {
+      operation: 'deduplicateCompsResilient',
+      originalCount: comps.length,
+      dedupedCount: dedupedResults.length
+    });
+    
+    return dedupedResults;
+    
+  } catch (error) {
+    logger.error('Deduplication failed completely', error);
+    // Return original comps if deduplication fails
+    return comps.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }
-  
-  const dedupedResults = Array.from(seen.values())
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  
-  logger.info('Deduplication complete', {
-    operation: 'deduplicateComps',
-    originalCount: comps.length,
-    dedupedCount: dedupedResults.length
-  });
-  
-  return dedupedResults;
 }
 
-function createCompSignature(comp: NormalizedComp): string {
-  const normalizedTitle = comp.title.toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  
-  const titleWords = normalizedTitle.split(' ')
-    .filter(word => word.length > 2)
-    .sort()
-    .slice(0, 6);
-  
-  const priceGroup = Math.floor(comp.price / 10) * 10;
-  return `${titleWords.join('')}_${priceGroup}_${comp.source}`;
+function createCompSignatureResilient(comp: NormalizedComp): string {
+  try {
+    const normalizedTitle = (comp.title || '').toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    const titleWords = normalizedTitle.split(' ')
+      .filter(word => word.length > 2)
+      .sort()
+      .slice(0, 6);
+    
+    const price = comp.price || 0;
+    const priceGroup = Math.floor(price / 10) * 10;
+    const source = comp.source || 'unknown';
+    
+    return `${titleWords.join('')}_${priceGroup}_${source}`;
+    
+  } catch (error) {
+    // Fallback signature if processing fails
+    return `${comp.title || 'unknown'}_${comp.price || 0}_${comp.source || 'unknown'}`;
+  }
 }
 
-async function processScrapingResults(
-  scrapingResult: ScrapingResult,
+async function processResultsWithFallbacks(
+  scrapingResult: ResilientScrapingResult,
   query: SearchQuery,
   compLogic: string,
   logger: Logger
 ): Promise<Omit<ProductionScraperResponse, 'debug'>> {
+  
   if (scrapingResult.comps.length === 0) {
-    logger.warn('No comparable sales found', { operation: 'processScrapingResults' });
+    logger.warn('No comparable sales found', { operation: 'processResultsWithFallbacks' });
     
     return {
       estimatedValue: '$0.00',
@@ -350,48 +447,105 @@ async function processScrapingResults(
       exactMatchFound: false,
       confidence: 0,
       methodology: 'No data available',
-      matchMessage: 'No comparable sales found for this card',
+      matchMessage: `No comparable sales found for ${query.player}${query.year !== 'unknown' ? ` ${query.year}` : ''}`,
       comps: [],
       errors: scrapingResult.errors.length > 0 ? scrapingResult.errors : [{
         source: 'System',
-        message: 'No sales data found for this card across all search variations'
+        message: 'No sales data found across all sources and search strategies'
       }]
     };
   }
 
-  // Find relevant matches
-  const matchResult = findRelevantMatches(scrapingResult.comps, query, 0.3);
-  
-  // Calculate estimated value
-  const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
-  
-  logger.info('Results processed successfully', {
-    operation: 'processScrapingResults',
-    compCount: matchResult.relevantComps.length,
-    exactMatch: matchResult.exactMatchFound,
-    estimatedValue: compingResult.estimatedValue
-  });
+  try {
+    // Find relevant matches with error handling
+    let matchResult: MatchResult;
+    try {
+      matchResult = findRelevantMatches(scrapingResult.comps, query, 0.3);
+    } catch (error) {
+      logger.error('Match finding failed', error);
+      
+      // Fallback: use all comps as relevant matches
+      matchResult = {
+        relevantComps: scrapingResult.comps.slice(0, 10), // Limit to prevent processing issues
+        exactMatchFound: false,
+        matchMessage: 'Using all available sales data (match finding failed)'
+      };
+    }
+    
+    // Calculate estimated value with error handling
+    let compingResult: CompingResult;
+    try {
+      compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
+    } catch (error) {
+      logger.error('Value calculation failed', error);
+      
+      // Fallback calculation
+      const prices = matchResult.relevantComps.map(c => c.price).filter(p => p > 0);
+      const avgPrice = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
+      
+      compingResult = {
+        estimatedValue: avgPrice,
+        confidence: 0.3,
+        methodology: 'Simple average (calculation failed)'
+      };
+    }
+    
+    logger.info('Results processed successfully', {
+      operation: 'processResultsWithFallbacks',
+      compCount: matchResult.relevantComps.length,
+      exactMatch: matchResult.exactMatchFound,
+      estimatedValue: compingResult.estimatedValue
+    });
 
-  return {
-    estimatedValue: `$${compingResult.estimatedValue.toFixed(2)}`,
-    logicUsed: compLogic,
-    exactMatchFound: matchResult.exactMatchFound,
-    confidence: compingResult.confidence,
-    methodology: compingResult.methodology,
-    matchMessage: matchResult.matchMessage,
-    comps: matchResult.relevantComps.map(comp => ({
-      title: comp.title,
-      price: comp.price,
-      date: comp.date,
-      source: comp.source,
-      image: comp.image,
-      url: comp.url
-    })),
-    errors: scrapingResult.errors
-  };
+    return {
+      estimatedValue: `$${compingResult.estimatedValue.toFixed(2)}`,
+      logicUsed: compLogic,
+      exactMatchFound: matchResult.exactMatchFound,
+      confidence: compingResult.confidence,
+      methodology: compingResult.methodology,
+      matchMessage: matchResult.matchMessage,
+      comps: matchResult.relevantComps.map(comp => ({
+        title: comp.title || 'Unknown Title',
+        price: comp.price || 0,
+        date: comp.date || new Date().toISOString().split('T')[0],
+        source: comp.source || 'Unknown',
+        image: comp.image,
+        url: comp.url || '#'
+      })),
+      errors: scrapingResult.errors
+    };
+    
+  } catch (error) {
+    logger.error('Complete result processing failed', error);
+    
+    // Ultimate fallback
+    const prices = scrapingResult.comps.map(c => c.price).filter(p => p > 0);
+    const avgPrice = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
+    
+    return {
+      estimatedValue: `$${avgPrice.toFixed(2)}`,
+      logicUsed: compLogic,
+      exactMatchFound: false,
+      confidence: 0.2,
+      methodology: 'Emergency fallback calculation',
+      matchMessage: 'Processing failed, using basic average',
+      comps: scrapingResult.comps.slice(0, 5).map(comp => ({
+        title: comp.title || 'Unknown Title',
+        price: comp.price || 0,
+        date: comp.date || new Date().toISOString().split('T')[0],
+        source: comp.source || 'Unknown',
+        image: comp.image,
+        url: comp.url || '#'
+      })),
+      errors: [
+        ...scrapingResult.errors,
+        { source: 'Result Processor', message: `Processing failed: ${error.message}` }
+      ]
+    };
+  }
 }
 
-function createErrorResponse(
+function createRobustErrorResponse(
   message: string,
   compLogic: string,
   processingTime: number,
@@ -405,7 +559,7 @@ function createErrorResponse(
     logicUsed: compLogic,
     exactMatchFound: false,
     confidence: 0,
-    methodology: 'Error occurred',
+    methodology: 'Error occurred - no data processed',
     matchMessage: message,
     comps: [],
     errors: errors.length > 0 ? errors : [{
@@ -421,19 +575,24 @@ function createErrorResponse(
   };
 }
 
-// Legacy function for backward compatibility
+// Legacy function maintained for backward compatibility
 export async function fetchRealSalesData(query: SearchQuery, sources: string[]): Promise<SalesResult[]> {
-  const result = await fetchProductionComps(query, sources, 'average3');
-  
-  return result.comps.map((comp, index) => ({
-    id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
-    title: comp.title,
-    price: comp.price,
-    date: comp.date,
-    source: comp.source,
-    url: comp.url,
-    thumbnail: comp.image,
-    matchScore: 0.5,
-    selected: true
-  }));
+  try {
+    const result = await fetchProductionComps(query, sources, 'average3');
+    
+    return result.comps.map((comp, index) => ({
+      id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
+      title: comp.title,
+      price: comp.price,
+      date: comp.date,
+      source: comp.source,
+      url: comp.url,
+      thumbnail: comp.image,
+      matchScore: 0.5,
+      selected: true
+    }));
+  } catch (error) {
+    console.error('Legacy fetchRealSalesData failed:', error);
+    return [];
+  }
 }
