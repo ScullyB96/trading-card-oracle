@@ -37,6 +37,9 @@ export function handleError(error: any, traceId: string, logger?: any) {
       code: error.code,
       traceId
     };
+  } else {
+    // Handle generic errors that might not be instances of CardProcessingError
+    responseBody.error = error.message || 'An unexpected error occurred.';
   }
 
   return new Response(JSON.stringify(responseBody), {
