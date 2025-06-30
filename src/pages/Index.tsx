@@ -1,4 +1,3 @@
-
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,6 +10,8 @@ import { ResultsDisplay, SalesResult } from "@/components/ResultsDisplay";
 import { Sparkles, TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Info } from "lucide-react";
 
 export interface EstimationRequest {
   image?: string;
@@ -30,6 +31,7 @@ const Index = () => {
   const [estimatedValue, setEstimatedValue] = useState<number | null>(null);
   const [logicUsed, setLogicUsed] = useState<string>("");
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [showExactMatchWarning, setShowExactMatchWarning] = useState(false);
 
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -60,6 +62,7 @@ const Index = () => {
     }
 
     setIsLoading(true);
+    setShowExactMatchWarning(false);
     console.log("Submitting estimation request:", {
       hasImage: !!uploadedImage,
       description: cardDescription,
@@ -90,20 +93,61 @@ const Index = () => {
       }
 
       if (data.success) {
-        // Set all results as selected by default
-        const salesWithSelection = data.salesResults.map((result: any) => ({
-          ...result,
-          selected: true
-        }));
+        // Safely handle the comps array from backend
+        const comps = data.comps || data.salesResults || [];
+        
+        // Check if we have the required data
+        if (!data.estimatedValue && (!comps || !Array.isArray(comps) || comps.length === 0)) {
+          toast({
+            title: "No Results Found",
+            description: "No comps found, please try another image or description.",
+            variant: "destructive"
+          });
+          setResults([]);
+          setEstimatedValue(null);
+          setLogicUsed("");
+          setWarnings([]);
+          return;
+        }
+
+        // Convert comps to SalesResult format with safety checks
+        const salesWithSelection = Array.isArray(comps) ? comps.map((result: any, index: number) => ({
+          id: result.id || `comp_${Date.now()}_${index}`,
+          title: result.title || 'Unknown Card',
+          price: typeof result.price === 'number' ? result.price : 0,
+          date: result.date || new Date().toISOString().split('T')[0],
+          source: result.source || 'Unknown',
+          url: result.url || '#',
+          thumbnail: result.image || result.thumbnail,
+          selected: true,
+          type: result.type,
+          matchScore: result.matchScore || 0
+        })) : [];
         
         setResults(salesWithSelection);
-        setEstimatedValue(data.estimatedValue);
-        setLogicUsed(data.logicUsed);
+        
+        // Parse estimated value safely
+        const estimatedVal = typeof data.estimatedValue === 'string' 
+          ? parseFloat(data.estimatedValue.replace('$', '')) 
+          : (typeof data.estimatedValue === 'number' ? data.estimatedValue : null);
+        
+        setEstimatedValue(estimatedVal);
+        setLogicUsed(data.logicUsed || compLogic);
         setWarnings(data.warnings || []);
+        
+        // Show exact match warning if needed
+        if (data.exactMatchFound === false) {
+          setShowExactMatchWarning(true);
+        }
+        
+        const resultCount = salesWithSelection.length;
+        const estimatedValueStr = estimatedVal ? `$${estimatedVal.toFixed(2)}` : 'N/A';
         
         toast({
           title: "Analysis Complete",
-          description: `Found ${data.salesResults.length} comparable sales. Estimated value: $${data.estimatedValue.toFixed(2)}`,
+          description: resultCount > 0 
+            ? `Found ${resultCount} comparable sales. Estimated value: ${estimatedValueStr}`
+            : "Analysis complete, but no comparable sales found.",
         });
       } else {
         console.error('Function returned error:', data);
@@ -251,6 +295,16 @@ const Index = () => {
       </div>
 
       <div className="container mx-auto px-4 py-8 max-w-4xl">
+        {/* Exact Match Warning Banner */}
+        {showExactMatchWarning && (
+          <Alert className="mb-4 border-blue-200 bg-blue-50">
+            <Info className="h-4 w-4 text-blue-600" />
+            <AlertDescription className="text-blue-800">
+              We couldn't find an exact match. Here are some similar cards.
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Main Input Section */}
           <div className="lg:col-span-2 space-y-6">
