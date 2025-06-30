@@ -41,5 +41,4 @@ const CardDescriptionComponent = ({ description, onDescriptionChange }: CardDesc
   );
 };
 
-export const CardDescriptionComponent = memo(CardDescriptionComponent);
-xport const CardDescription = memo(CardDescriptionComponent);
+export const CardDescription = memo(CardDescriptionComponent);
