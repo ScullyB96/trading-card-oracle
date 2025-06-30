@@ -1,4 +1,6 @@
 
+import { config } from './config.ts';
+
 export interface ExtractedCardInfo {
   player: string;
   year: string;
@@ -9,9 +11,6 @@ export interface ExtractedCardInfo {
   confidence: number;
   rawText: string;
 }
-
-const GOOGLE_VISION_API_KEY = Deno.env.get('GOOGLE_API_KEY');
-const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
 
 export async function extractCardInfoFromImage(base64Image: string): Promise<ExtractedCardInfo> {
   console.log('Processing image with Vision API');
@@ -47,7 +46,7 @@ export async function extractCardInfoFromImage(base64Image: string): Promise<Ext
 }
 
 async function extractTextFromImage(base64Image: string): Promise<string> {
-  if (!GOOGLE_VISION_API_KEY) {
+  if (!config.googleVisionApiKey) {
     throw new Error('Google Vision API key not configured');
   }
 
@@ -61,7 +60,7 @@ async function extractTextFromImage(base64Image: string): Promise<string> {
   };
 
   const response = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`,
+    `https://vision.googleapis.com/v1/images:annotate?key=${config.googleVisionApiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -85,7 +84,7 @@ async function extractTextFromImage(base64Image: string): Promise<string> {
 }
 
 async function extractDocumentText(base64Image: string): Promise<string> {
-  if (!GOOGLE_VISION_API_KEY) {
+  if (!config.googleVisionApiKey) {
     return '';
   }
 
@@ -100,7 +99,7 @@ async function extractDocumentText(base64Image: string): Promise<string> {
 
   try {
     const response = await fetch(
-      `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`,
+      `https://vision.googleapis.com/v1/images:annotate?key=${config.googleVisionApiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -123,7 +122,7 @@ async function extractDocumentText(base64Image: string): Promise<string> {
 async function parseExtractedText(text: string): Promise<ExtractedCardInfo> {
   console.log('Parsing extracted text with OpenAI');
   
-  if (!OPENAI_API_KEY) {
+  if (!config.openaiApiKey) {
     throw new Error('OpenAI API key not configured');
   }
 
@@ -153,7 +152,7 @@ async function parseExtractedText(text: string): Promise<ExtractedCardInfo> {
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Authorization': `Bearer ${config.openaiApiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
