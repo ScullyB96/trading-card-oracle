@@ -1,4 +1,3 @@
-
 export interface SalesResult {
   id: string;
   title: string;
@@ -107,13 +106,16 @@ async function scrapeEbaySales(query: SearchQuery): Promise<SalesResult[]> {
       const daysAgo = Math.floor(Math.random() * 90) + 1;
       const saleDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
       
+      // Generate a realistic eBay search URL instead of a fake item URL
+      const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(searchTerms)}&_sacat=0&LH_Sold=1&LH_Complete=1`;
+      
       mockEbayResults.push({
         id: `ebay_${Date.now()}_${i}`,
         title: `${query.player} ${query.year} ${query.set} #${query.cardNumber} ${query.grade || ''} ${query.sport}`.trim(),
         price: price,
         date: saleDate.toISOString().split('T')[0],
         source: 'eBay',
-        url: `https://ebay.com/itm/${Math.floor(Math.random() * 1000000000)}`,
+        url: searchUrl,
         type: Math.random() > 0.7 ? 'auction' : 'buy-it-now',
         condition: getRandomCondition(),
         matchScore: calculateMatchScore(query, `${query.player} ${query.year} ${query.set}`)
@@ -144,13 +146,16 @@ async function scrape130PointSales(query: SearchQuery): Promise<SalesResult[]> {
       const daysAgo = Math.floor(Math.random() * 120) + 1;
       const saleDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
       
+      // Generate a realistic 130point search URL
+      const searchUrl = `https://130point.com/sales/?search=${encodeURIComponent(query.player + ' ' + query.year + ' ' + query.set)}`;
+      
       results.push({
         id: `130point_${Date.now()}_${i}`,
         title: `${query.player} ${query.year} ${query.set} Card #${query.cardNumber}`,
         price: price,
         date: saleDate.toISOString().split('T')[0],
         source: '130point',
-        url: `https://130point.com/sales/${Math.floor(Math.random() * 100000)}`,
+        url: searchUrl,
         type: 'auction',
         matchScore: calculateMatchScore(query, `${query.player} ${query.year}`)
       });
@@ -186,13 +191,16 @@ async function scrapeGoldinSales(query: SearchQuery): Promise<SalesResult[]> {
       const daysAgo = Math.floor(Math.random() * 180) + 1;
       const saleDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
       
+      // Generate a realistic Goldin search URL
+      const searchUrl = `https://goldin.co/search?q=${encodeURIComponent(query.player + ' ' + query.year + ' ' + query.set)}`;
+      
       results.push({
         id: `goldin_${Date.now()}_${i}`,
         title: `${query.player} ${query.year} ${query.set} #${query.cardNumber} ${query.grade || ''}`.trim(),
         price: price,
         date: saleDate.toISOString().split('T')[0],
         source: 'Goldin',
-        url: `https://goldin.co/lot/${Math.floor(Math.random() * 100000)}`,
+        url: searchUrl,
         type: 'auction',
         matchScore: calculateMatchScore(query, `${query.player} ${query.year} ${query.set}`)
       });
@@ -224,13 +232,16 @@ async function scrapePWCCSales(query: SearchQuery): Promise<SalesResult[]> {
     const daysAgo = Math.floor(Math.random() * 150) + 1;
     const saleDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
     
+    // Generate a realistic PWCC search URL
+    const searchUrl = `https://www.pwccmarketplace.com/search?q=${encodeURIComponent(query.player + ' ' + query.year + ' ' + query.set)}`;
+    
     results.push({
       id: `pwcc_${Date.now()}`,
       title: `${query.player} ${query.year} ${query.set} Card #${query.cardNumber}`,
       price: price,
       date: saleDate.toISOString().split('T')[0],
       source: 'PWCC',
-      url: `https://pwccmarketplace.com/lot/${Math.floor(Math.random() * 100000)}`,
+      url: searchUrl,
       type: 'marketplace',
       matchScore: calculateMatchScore(query, `${query.player} ${query.year}`)
     });
