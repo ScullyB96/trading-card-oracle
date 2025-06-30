@@ -3,21 +3,46 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { ExternalLink, DollarSign, Calendar, Building } from "lucide-react";
-import { SalesResult } from "@/pages/Index";
+import { ExternalLink, DollarSign, Calendar, Building, AlertTriangle, Info } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+
+export interface SalesResult {
+  id: string;
+  title: string;
+  price: number;
+  date: string;
+  source: string;
+  url: string;
+  thumbnail?: string;
+  selected: boolean;
+  type?: string;
+}
 
 interface ResultsDisplayProps {
   results: SalesResult[];
   estimatedValue: number | null;
   onResultToggle: (id: string) => void;
   isLoading: boolean;
+  logicUsed?: string;
+  warnings?: string[];
 }
+
+const logicLabels: { [key: string]: string } = {
+  lastSale: "Last Sale",
+  average3: "Average of 3",
+  average5: "Average of 5",
+  median: "Median Price",
+  conservative: "Conservative (25th percentile)",
+  mode: "Most Common Range"
+};
 
 export const ResultsDisplay = ({ 
   results, 
   estimatedValue, 
   onResultToggle, 
-  isLoading 
+  isLoading,
+  logicUsed,
+  warnings
 }: ResultsDisplayProps) => {
   const selectedResults = results.filter(r => r.selected);
   const hasResults = results.length > 0;
@@ -71,14 +96,34 @@ export const ResultsDisplay = ({
           </div>
         ) : (
           <div className="space-y-6">
+            {/* Warnings */}
+            {warnings && warnings.length > 0 && (
+              <Alert className="border-amber-200 bg-amber-50">
+                <AlertTriangle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-amber-800">
+                  <div className="space-y-1">
+                    {warnings.map((warning, index) => (
+                      <div key={index} className="text-sm">{warning}</div>
+                    ))}
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
+
             {/* Estimated Value */}
             <div className="text-center p-6 bg-gradient-to-r from-green-50 to-blue-50 rounded-xl border border-green-200">
               <div className="text-3xl font-bold text-green-700 mb-2">
                 {estimatedValue ? `$${estimatedValue.toFixed(2)}` : 'N/A'}
               </div>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-gray-600 mb-1">
                 Based on {selectedResults.length} selected sale{selectedResults.length !== 1 ? 's' : ''}
               </p>
+              {logicUsed && (
+                <div className="flex items-center justify-center space-x-1 text-xs text-blue-600">
+                  <Info className="h-3 w-3" />
+                  <span>Using {logicLabels[logicUsed] || logicUsed}</span>
+                </div>
+              )}
             </div>
 
             {/* Sales Results */}
@@ -129,9 +174,16 @@ export const ResultsDisplay = ({
                             <span className="text-lg font-bold text-green-600">
                               ${result.price.toFixed(2)}
                             </span>
-                            <Badge variant="secondary" className="text-xs">
-                              {result.source}
-                            </Badge>
+                            <div className="flex items-center space-x-2">
+                              {result.type && (
+                                <Badge variant="outline" className="text-xs capitalize">
+                                  {result.type}
+                                </Badge>
+                              )}
+                              <Badge variant="secondary" className="text-xs">
+                                {result.source}
+                              </Badge>
+                            </div>
                           </div>
                           
                           <div className="flex items-center space-x-3 text-xs text-gray-500">

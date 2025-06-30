@@ -1,3 +1,4 @@
+
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
@@ -28,6 +29,29 @@ interface SalesResult {
   url: string;
   thumbnail?: string;
   selected: boolean;
+  type?: string; // auction, buy-it-now, etc.
+}
+
+interface ParsedCardInfo {
+  player: string;
+  year: string;
+  set: string;
+  cardNumber: string;
+  type: string;
+  grade?: string;
+  sport: string;
+  rawDescription: string;
+}
+
+interface EstimationResponse {
+  success: boolean;
+  cardInfo?: ParsedCardInfo;
+  salesResults?: SalesResult[];
+  estimatedValue?: number;
+  logicUsed?: string;
+  warnings?: string[];
+  error?: string;
+  details?: string;
 }
 
 serve(async (req) => {
@@ -83,6 +107,7 @@ serve(async (req) => {
     }
 
     let cardInfo = '';
+    const warnings: string[] = [];
 
     // Step 1: Extract card information
     if (requestData.image) {
@@ -92,6 +117,7 @@ serve(async (req) => {
         console.log('Extracted text:', cardInfo);
       } catch (error) {
         console.error('Image processing failed:', error);
+        warnings.push(`Image processing failed: ${error.message}`);
         
         // Check for specific Google Vision API errors
         if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
@@ -148,12 +174,13 @@ serve(async (req) => {
 
     // Step 2: Parse and enhance card information using OpenAI
     console.log('=== PARSING CARD INFO ===');
-    let parsedCardInfo;
+    let parsedCardInfo: ParsedCardInfo;
     try {
       parsedCardInfo = await parseCardInformation(cardInfo);
       console.log('Parsed card info:', parsedCardInfo);
     } catch (error) {
       console.error('Card parsing failed:', error);
+      warnings.push(`Card parsing failed: ${error.message}`);
       
       // Check for OpenAI quota errors
       if (error.message.includes('insufficient_quota') || error.message.includes('exceeded your current quota')) {
@@ -188,12 +215,13 @@ serve(async (req) => {
 
     // Step 3: Search for comparable sales
     console.log('=== SEARCHING SALES ===');
-    let salesResults;
+    let salesResults: SalesResult[];
     try {
       salesResults = await searchComparableSales(parsedCardInfo, requestData.sources);
       console.log('Found sales results:', salesResults.length);
     } catch (error) {
       console.error('Sales search failed:', error);
+      warnings.push(`Sales search failed: ${error.message}`);
       return new Response(
         JSON.stringify({
           success: false,
@@ -210,12 +238,13 @@ serve(async (req) => {
 
     // Step 4: Calculate estimated value
     console.log('=== CALCULATING VALUE ===');
-    let estimatedValue;
+    let estimatedValue: number;
     try {
       estimatedValue = calculateEstimatedValue(salesResults, requestData.compLogic);
       console.log('Calculated value:', estimatedValue);
     } catch (error) {
       console.error('Value calculation failed:', error);
+      warnings.push(`Value calculation failed: ${error.message}`);
       return new Response(
         JSON.stringify({
           success: false,
@@ -231,13 +260,17 @@ serve(async (req) => {
     }
 
     console.log('=== SUCCESS ===');
+    const response: EstimationResponse = {
+      success: true,
+      cardInfo: parsedCardInfo,
+      salesResults,
+      estimatedValue,
+      logicUsed: requestData.compLogic,
+      warnings: warnings.length > 0 ? warnings : undefined
+    };
+
     return new Response(
-      JSON.stringify({
-        success: true,
-        cardInfo: parsedCardInfo,
-        salesResults,
-        estimatedValue
-      }),
+      JSON.stringify(response),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       }
@@ -357,7 +390,7 @@ async function extractTextFromImage(base64Image: string): Promise<string> {
   }
 }
 
-async function parseCardInformation(rawText: string): Promise<string> {
+async function parseCardInformation(rawText: string): Promise<ParsedCardInfo> {
   console.log('=== PARSE CARD INFORMATION ===');
   
   // Try multiple possible environment variable names for OpenAI API key
@@ -383,23 +416,27 @@ async function parseCardInformation(rawText: string): Promise<string> {
         messages: [
           {
             role: 'system',
-            content: `You are an expert trading card analyzer. Parse the following text and extract key information about the trading card. Return a structured description that includes:
-            - Player name
-            - Year and brand/set
-            - Card number
-            - Type (rookie, parallel, base, etc.)
-            - Condition/grade if mentioned
-            - Sport
+            content: `You are an expert trading card analyzer. Parse the following text and extract key information about the trading card. Return ONLY a valid JSON object with these exact fields:
+            {
+              "player": "Player name",
+              "year": "Year of the card",
+              "set": "Brand/Set name",
+              "cardNumber": "Card number",
+              "type": "Type (rookie, parallel, base, etc.)",
+              "grade": "Condition/grade if mentioned, otherwise null",
+              "sport": "Sport (basketball, football, baseball, hockey, etc.)",
+              "rawDescription": "Clean, searchable description for finding comparable sales"
+            }
             
-            Format the response as a clear, searchable description that would be useful for finding comparable sales.`
+            Be precise with field extraction. If a field cannot be determined, use "Unknown" for strings or null for optional fields.`
           },
           {
             role: 'user',
             content: rawText
           }
         ],
-        temperature: 0.3,
-        max_tokens: 500
+        temperature: 0.1,
+        max_tokens: 300
       }),
     });
 
@@ -425,7 +462,16 @@ async function parseCardInformation(rawText: string): Promise<string> {
     console.log('OpenAI API response data keys:', Object.keys(data));
     
     if (data.choices?.[0]?.message?.content) {
-      return data.choices[0].message.content;
+      const content = data.choices[0].message.content.trim();
+      console.log('OpenAI raw response:', content);
+      
+      try {
+        const parsedInfo = JSON.parse(content);
+        return parsedInfo as ParsedCardInfo;
+      } catch (parseError) {
+        console.error('Failed to parse JSON from OpenAI:', parseError);
+        throw new Error('Failed to parse structured card information from AI response');
+      }
     }
     
     throw new Error('Failed to parse card information - no content in response');
@@ -435,9 +481,9 @@ async function parseCardInformation(rawText: string): Promise<string> {
   }
 }
 
-async function searchComparableSales(cardInfo: string, sources: string[]): Promise<SalesResult[]> {
+async function searchComparableSales(cardInfo: ParsedCardInfo, sources: string[]): Promise<SalesResult[]> {
   console.log('=== SEARCH COMPARABLE SALES ===');
-  console.log(`Searching for: ${cardInfo} across sources: ${sources.join(', ')}`);
+  console.log(`Searching for: ${cardInfo.rawDescription} across sources: ${sources.join(', ')}`);
   
   // This is a mock implementation. In a real app, you would integrate with actual APIs
   // from eBay, 130point, Goldin, and PWCC
@@ -447,25 +493,31 @@ async function searchComparableSales(cardInfo: string, sources: string[]): Promi
 
   try {
     if (sources.includes('ebay')) {
-      mockResults.push({
-        id: (idCounter++).toString(),
-        title: `${cardInfo} - eBay Sale`,
-        price: Math.floor(Math.random() * 200) + 50,
-        date: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        source: 'eBay',
-        url: 'https://ebay.com/itm/123456789',
-        selected: true
-      });
+      // Generate 2-3 eBay results
+      const numResults = Math.floor(Math.random() * 2) + 2;
+      for (let i = 0; i < numResults; i++) {
+        mockResults.push({
+          id: (idCounter++).toString(),
+          title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} #${cardInfo.cardNumber} ${cardInfo.type}`,
+          price: Math.floor(Math.random() * 300) + 50,
+          date: new Date(Date.now() - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          source: 'eBay',
+          url: `https://ebay.com/itm/${Math.floor(Math.random() * 1000000000)}`,
+          type: i === 0 ? 'auction' : 'buy-it-now',
+          selected: true
+        });
+      }
     }
 
     if (sources.includes('130point')) {
       mockResults.push({
         id: (idCounter++).toString(),
-        title: `${cardInfo} - 130point Auction`,
+        title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} Card #${cardInfo.cardNumber}`,
         price: Math.floor(Math.random() * 250) + 75,
-        date: new Date(Date.now() - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        date: new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         source: '130point',
-        url: 'https://130point.com/sales/123456',
+        url: `https://130point.com/sales/${Math.floor(Math.random() * 100000)}`,
+        type: 'auction',
         selected: true
       });
     }
@@ -473,11 +525,12 @@ async function searchComparableSales(cardInfo: string, sources: string[]): Promi
     if (sources.includes('goldin')) {
       mockResults.push({
         id: (idCounter++).toString(),
-        title: `${cardInfo} - Goldin Auction`,
-        price: Math.floor(Math.random() * 300) + 100,
-        date: new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} #${cardInfo.cardNumber} ${cardInfo.grade || ''}`.trim(),
+        price: Math.floor(Math.random() * 400) + 100,
+        date: new Date(Date.now() - Math.random() * 120 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         source: 'Goldin',
-        url: 'https://goldin.co/lot/123456',
+        url: `https://goldin.co/lot/${Math.floor(Math.random() * 100000)}`,
+        type: 'auction',
         selected: true
       });
     }
@@ -485,11 +538,12 @@ async function searchComparableSales(cardInfo: string, sources: string[]): Promi
     if (sources.includes('pwcc')) {
       mockResults.push({
         id: (idCounter++).toString(),
-        title: `${cardInfo} - PWCC Marketplace`,
-        price: Math.floor(Math.random() * 180) + 60,
-        date: new Date(Date.now() - Math.random() * 45 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} Card #${cardInfo.cardNumber}`,
+        price: Math.floor(Math.random() * 280) + 60,
+        date: new Date(Date.now() - Math.random() * 75 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         source: 'PWCC',
-        url: 'https://pwccmarketplace.com/lot/123456',
+        url: `https://pwccmarketplace.com/lot/${Math.floor(Math.random() * 100000)}`,
+        type: 'marketplace',
         selected: true
       });
     }
@@ -514,32 +568,48 @@ function calculateEstimatedValue(salesResults: SalesResult[], compLogic: string)
     return 0;
   }
 
-  const prices = selectedResults.map(r => r.price);
-  console.log('Prices:', prices);
+  const prices = selectedResults.map(r => r.price).sort((a, b) => a - b);
+  console.log('Sorted prices:', prices);
   
   let result = 0;
   
   try {
     switch (compLogic) {
+      case 'lastSale':
+        // Take the most recent sale (first in the array since they're sorted by date desc)
+        result = selectedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0].price;
+        break;
+      
       case 'average3':
         // Take average of up to 3 most recent sales
-        const recent3 = prices.slice(0, 3);
+        const recent3 = selectedResults
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .slice(0, 3)
+          .map(r => r.price);
         result = Math.round((recent3.reduce((sum, price) => sum + price, 0) / recent3.length) * 100) / 100;
         break;
       
+      case 'average5':
+        // Take average of up to 5 most recent sales
+        const recent5 = selectedResults
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .slice(0, 5)
+          .map(r => r.price);
+        result = Math.round((recent5.reduce((sum, price) => sum + price, 0) / recent5.length) * 100) / 100;
+        break;
+      
       case 'median':
-        const sorted = [...prices].sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        result = sorted.length % 2 === 0 
-          ? Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 100) / 100
-          : sorted[mid];
+        const mid = Math.floor(prices.length / 2);
+        result = prices.length % 2 === 0 
+          ? Math.round(((prices[mid - 1] + prices[mid]) / 2) * 100) / 100
+          : prices[mid];
         break;
       
       case 'mode':
-        // Find most common price range (within $10)
+        // Find most common price range (within $20)
         const ranges: { [key: string]: number[] } = {};
         prices.forEach(price => {
-          const range = Math.floor(price / 10) * 10;
+          const range = Math.floor(price / 20) * 20;
           if (!ranges[range]) ranges[range] = [];
           ranges[range].push(price);
         });
@@ -553,18 +623,17 @@ function calculateEstimatedValue(salesResults: SalesResult[], compLogic: string)
       
       case 'conservative':
         // Take 25th percentile
-        const sortedConservative = [...prices].sort((a, b) => a - b);
-        const index = Math.floor(sortedConservative.length * 0.25);
-        result = sortedConservative[index];
+        const index = Math.floor(prices.length * 0.25);
+        result = prices[index];
         break;
       
       default:
-        // Default to average
+        // Default to average of all selected results
         result = Math.round((prices.reduce((sum, price) => sum + price, 0) / prices.length) * 100) / 100;
         break;
     }
     
-    console.log(`Calculated value: ${result}`);
+    console.log(`Calculated value using ${compLogic}: ${result}`);
     return result;
   } catch (error) {
     console.error('Error in value calculation:', error);

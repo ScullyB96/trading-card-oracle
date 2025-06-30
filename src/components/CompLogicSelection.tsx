@@ -28,6 +28,16 @@ const compOptions = [
     value: "median", 
     label: "Median Price", 
     description: "Middle value of recent sales" 
+  },
+  { 
+    value: "conservative", 
+    label: "Conservative (25th percentile)", 
+    description: "Lower end estimate for conservative valuation" 
+  },
+  { 
+    value: "mode", 
+    label: "Most Common Range", 
+    description: "Average of most frequently occurring price range" 
   }
 ];
 
