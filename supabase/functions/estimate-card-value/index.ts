@@ -1,326 +1,357 @@
-import { useState, useCallback } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ImageUpload } from "@/components/ImageUpload";
-import { CardDescription } from "@/components/CardDescription";
-import { SourceSelection } from "@/components/SourceSelection";
-import { CompLogicSelection } from "@/components/CompLogicSelection";
-import { ResultsDisplay, SalesResult } from "@/components/ResultsDisplay";
-import { EstimationSummary } from "@/components/EstimationSummary";
-import { ArchitectureStatus } from "@/components/ArchitectureStatus";
-import { Sparkles, TrendingUp, Info } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
-import { toast } from "@/hooks/use-toast";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 
-export interface EstimationRequest {
+import "https://deno.land/x/xhr@0.1.0/mod.ts";
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
+import { extractCardInfoFromImage, parseCardDescription, ExtractedCardKeywords } from './vision-parser.ts';
+import { fetchProductionComps, ProductionScraperResponse } from './sales-scrapers.ts';
+import { config } from './config.ts';
+import { Logger } from './logger.ts';
+import { generateTraceId } from './utils.ts';
+import { CardProcessingError, ValidationError, ConfigurationError } from './errors.ts';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+interface EstimationRequest {
   image?: string;
   description?: string;
   sources: string[];
   compLogic: string;
 }
 
-const Index = () => {
-  const [activeTab, setActiveTab] = useState("image");
-  const [uploadedImage, setUploadedImage] = useState<File | null>(null);
-  const [cardDescription, setCardDescription] = useState("");
-  const [selectedSources, setSelectedSources] = useState<string[]>(["ebay", "130point"]);
-  const [compLogic, setCompLogic] = useState("average3");
-  const [isLoading, setIsLoading] = useState(false);
-  const [results, setResults] = useState<SalesResult[]>([]);
-  const [estimatedValue, setEstimatedValue] = useState<number | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [showExactMatchWarning, setShowExactMatchWarning] = useState(false);
-  const [estimationData, setEstimationData] = useState<any>(null);
+interface EstimationResponse {
+  success: boolean;
+  cardInfo?: ExtractedCardKeywords;
+  salesResults?: any[];
+  estimatedValue?: number;
+  confidence?: number;
+  methodology?: string;
+  dataPoints?: number;
+  priceRange?: { low: number; high: number };
+  logicUsed?: string;
+  warnings?: string[];
+  error?: string;
+  details?: string;
+  traceId?: string;
+  exactMatchFound?: boolean;
+  matchMessage?: string;
+  productionResponse?: ProductionScraperResponse;
+  errors?: Array<{
+    source: string;
+    message: string;
+  }>;
+}
 
-  const fileToBase64 = useCallback((file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (error) => reject(error);
-    });
-  }, []);
+function createJsonResponse(data: object, status: number = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    status: status,
+  });
+}
 
-  const calculateEstimatedValue = useCallback((selectedResults: SalesResult[], logic: string): number => {
-    if (selectedResults.length === 0) return 0;
+function createSuccessResponse(data: Partial<EstimationResponse>, traceId: string): EstimationResponse {
+  return {
+    success: true,
+    traceId,
+    errors: [],
+    warnings: [],
+    ...data
+  };
+}
 
-    const prices = selectedResults.map((r) => r.price).sort((a, b) => a - b);
+function createErrorResponse(
+  message: string, 
+  traceId: string, 
+  errors: Array<{ source: string; message: string }> = [],
+  details?: string
+): EstimationResponse {
+  return {
+    success: false,
+    error: message,
+    details,
+    traceId,
+    errors,
+    warnings: [],
+    estimatedValue: 0,
+    confidence: 0,
+    methodology: 'Error occurred',
+    dataPoints: 0,
+    priceRange: { low: 0, high: 0 }
+  };
+}
 
-    switch (logic) {
-      case "lastSale":
-        return selectedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0].price;
-      case "average3":
-        const recent3 = selectedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 3).map((r) => r.price);
-        return Math.round((recent3.reduce((sum, price) => sum + price, 0) / recent3.length) * 100) / 100;
-      case "average5":
-        const recent5 = selectedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5).map((r) => r.price);
-        return Math.round((recent5.reduce((sum, price) => sum + price, 0) / recent5.length) * 100) / 100;
-      case "median":
-        const mid = Math.floor(prices.length / 2);
-        return prices.length % 2 === 0 ? Math.round(((prices[mid - 1] + prices[mid]) / 2) * 100) / 100 : prices[mid];
-      case "conservative":
-        const index = Math.floor(prices.length * 0.25);
-        return prices[index];
-      case "mode":
-        const ranges: { [key: string]: number[] } = {};
-        prices.forEach((price) => {
-          const range = Math.floor(price / 20) * 20;
-          if (!ranges[range]) ranges[range] = [];
-          ranges[range].push(price);
-        });
-        const mostCommonRange = Object.values(ranges).reduce((max, current) => (current.length > max.length ? current : max));
-        return Math.round((mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length) * 100) / 100;
-      default:
-        return Math.round((prices.reduce((sum, price) => sum + price, 0) / prices.length) * 100) / 100;
+async function validateAndParseRequest(req: Request): Promise<{ data: EstimationRequest; errors: string[] }> {
+  const errors: string[] = [];
+  
+  try {
+    const requestData: EstimationRequest = await req.json();
+    
+    if (!requestData.sources || requestData.sources.length === 0) {
+      errors.push('No data sources selected');
+    } else {
+      const validSources = requestData.sources.filter(s => ['ebay', '130point'].includes(s));
+      if (validSources.length === 0) {
+        errors.push('Invalid data sources provided');
+      }
+      requestData.sources = validSources;
     }
-  }, []);
+    
+    if (!requestData.image && !requestData.description?.trim()) {
+      errors.push('No input provided - either image or description is required');
+    }
+    
+    if (!requestData.compLogic) {
+      requestData.compLogic = 'average3';
+    }
+    
+    return { data: requestData, errors };
+    
+  } catch (error) {
+    console.error('Request parsing error:', error);
+    return { 
+      data: {} as EstimationRequest, 
+      errors: ['Invalid request format - unable to parse JSON'] 
+    };
+  }
+}
 
-  const handleResultToggle = useCallback((id: string) => {
-    setResults((prevResults) => {
-      const updatedResults = prevResults.map((result) =>
-        result.id === id ? { ...result, selected: !result.selected } : result
+async function safeExtractCardInfo(
+  requestData: EstimationRequest, 
+  logger: Logger
+): Promise<{ cardInfo?: ExtractedCardKeywords; errors: Array<{ source: string; message: string }> }> {
+  const errors: Array<{ source: string; message: string }> = [];
+  
+  try {
+    if (requestData.image) {
+      if (!config.googleVisionApiKey) {
+        errors.push({
+          source: 'Google Vision API',
+          message: 'Image processing is not available - API key not configured'
+        });
+        return { errors };
+      }
+      
+      logger.info('Processing image with NEW ARCHITECTURE Vision API');
+      const cardInfo = await extractCardInfoFromImage(requestData.image);
+      
+      if (!cardInfo.player || cardInfo.player === 'unknown') {
+        errors.push({
+          source: 'Image Processing',
+          message: 'Could not identify player from the provided image'
+        });
+        return { errors };
+      }
+      
+      logger.info('NEW ARCHITECTURE image processing successful', { 
+        player: cardInfo.player,
+        keywords: {
+          parallels: cardInfo.parallels.length,
+          specialAttributes: cardInfo.specialAttributes.length
+        },
+        confidence: cardInfo.confidence 
+      });
+      
+      return { cardInfo, errors };
+      
+    } else if (requestData.description?.trim()) {
+      logger.info('Processing text description with NEW ARCHITECTURE');
+      const cardInfo = await parseCardDescription(requestData.description.trim());
+      
+      if (!cardInfo.player || cardInfo.player === 'unknown') {
+        errors.push({
+          source: 'Text Processing',
+          message: 'Could not identify player from the provided description'
+        });
+        return { errors };
+      }
+      
+      logger.info('NEW ARCHITECTURE text processing successful', { 
+        player: cardInfo.player,
+        confidence: cardInfo.confidence 
+      });
+      
+      return { cardInfo, errors };
+    }
+    
+    errors.push({
+      source: 'Input Validation',
+      message: 'No valid input provided'
+    });
+    
+    return { errors };
+    
+  } catch (error) {
+    logger.error('NEW ARCHITECTURE card info extraction failed', error);
+    
+    errors.push({
+      source: requestData.image ? 'Image Processing' : 'Text Processing',
+      message: `Processing failed: ${error.message || 'Unknown error'}`
+    });
+    
+    return { errors };
+  }
+}
+
+async function safeFetchComps(
+  cardInfo: ExtractedCardKeywords,
+  sources: string[],
+  compLogic: string,
+  logger: Logger
+): Promise<{ response?: ProductionScraperResponse; errors: Array<{ source: string; message: string }> }> {
+  const errors: Array<{ source: string; message: string }> = [];
+  
+  try {
+    logger.info('Starting NEW ARCHITECTURE sales data fetch', { 
+      player: cardInfo.player,
+      keywords: {
+        year: cardInfo.year,
+        set: cardInfo.set,
+        parallels: cardInfo.parallels,
+        specialAttributes: cardInfo.specialAttributes
+      },
+      sources, 
+      compLogic 
+    });
+    
+    const response = await fetchProductionComps(cardInfo, sources, compLogic);
+    
+    if (response.errors && response.errors.length > 0) {
+      errors.push(...response.errors);
+    }
+    
+    logger.info('NEW ARCHITECTURE sales data fetch completed', {
+      success: response.estimatedValue !== '$0.00',
+      compsFound: response.comps?.length || 0,
+      estimatedValue: response.estimatedValue,
+      architecture: 'Discover-then-Scrape'
+    });
+    
+    return { response, errors };
+    
+  } catch (error) {
+    logger.error('NEW ARCHITECTURE sales data fetch failed', error);
+    
+    errors.push({
+      source: 'Sales Data Fetcher',
+      message: `Failed to fetch sales data: ${error.message || 'Unknown error'}`
+    });
+    
+    return { errors };
+  }
+}
+
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders, status: 200 });
+  }
+
+  const traceId = generateTraceId();
+  const logger = new Logger(traceId);
+  const startTime = Date.now();
+  
+  logger.info('NEW ARCHITECTURE Request received', { method: req.method });
+  
+  try {
+    const { data: requestData, errors: validationErrors } = await validateAndParseRequest(req);
+    
+    if (validationErrors.length > 0) {
+      logger.warn('Request validation failed', { errors: validationErrors });
+      
+      const errorResponse = createErrorResponse(
+        'Invalid request',
+        traceId,
+        validationErrors.map(error => ({ source: 'Request Validation', message: error })),
+        'Please check your request parameters and try again'
       );
-      const selectedResults = updatedResults.filter((r) => r.selected);
-      if (selectedResults.length > 0) {
-        setEstimatedValue(calculateEstimatedValue(selectedResults, compLogic));
-      } else {
-        setEstimatedValue(null);
-      }
-      return updatedResults;
+      
+      return createJsonResponse(errorResponse, 400);
+    }
+    
+    logger.info('NEW ARCHITECTURE Request validated successfully', {
+      hasImage: !!requestData.image,
+      hasDescription: !!requestData.description,
+      sources: requestData.sources,
+      compLogic: requestData.compLogic
     });
-  }, [calculateEstimatedValue, compLogic]);
-
-  const handleSubmit = useCallback(async () => {
-    if (!uploadedImage && !cardDescription.trim()) {
-      toast({
-        title: "Input Required",
-        description: "Please upload an image or provide a card description.",
-        variant: "destructive",
-      });
-      return;
+    
+    const { cardInfo, errors: cardErrors } = await safeExtractCardInfo(requestData, logger);
+    
+    if (!cardInfo) {
+      logger.warn('NEW ARCHITECTURE Card info extraction failed', { errors: cardErrors });
+      
+      const errorResponse = createErrorResponse(
+        'Unable to extract card information',
+        traceId,
+        cardErrors,
+        'Please try with a clearer image or more detailed description'
+      );
+      
+      return createJsonResponse(errorResponse, 400);
     }
-    if (selectedSources.length === 0) {
-      toast({
-        title: "Sources Required",
-        description: "Please select at least one data source.",
-        variant: "destructive",
-      });
-      return;
+    
+    const { response: productionResponse, errors: salesErrors } = await safeFetchComps(
+      cardInfo,
+      requestData.sources,
+      requestData.compLogic,
+      logger
+    );
+    
+    const allErrors = [...cardErrors, ...salesErrors];
+    
+    if (productionResponse) {
+      const processingTime = Date.now() - startTime;
+      logger.performance('NEW ARCHITECTURE Request completed', processingTime);
+      
+      const successResponse = createSuccessResponse({
+        cardInfo,
+        productionResponse,
+        estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
+        confidence: productionResponse.confidence,
+        methodology: productionResponse.methodology,
+        dataPoints: productionResponse.comps?.length || 0,
+        priceRange: productionResponse.comps?.length > 0 ? {
+          low: Math.min(...productionResponse.comps.map(c => c.price)),
+          high: Math.max(...productionResponse.comps.map(c => c.price))
+        } : { low: 0, high: 0 },
+        logicUsed: productionResponse.logicUsed,
+        exactMatchFound: productionResponse.exactMatchFound,
+        matchMessage: productionResponse.matchMessage,
+        errors: allErrors,
+        warnings: allErrors.length > 0 ? ['Some data sources encountered issues'] : []
+      }, traceId);
+      
+      return createJsonResponse(successResponse, 200);
+      
+    } else {
+      logger.warn('NEW ARCHITECTURE No sales data available', { errors: allErrors });
+      
+      const errorResponse = createErrorResponse(
+        'No sales data available',
+        traceId,
+        allErrors,
+        'Unable to find comparable sales for this card'
+      );
+      
+      if (cardInfo) {
+        errorResponse.cardInfo = cardInfo;
+      }
+      
+      return createJsonResponse(errorResponse, 200);
     }
-
-    setIsLoading(true);
-    setShowExactMatchWarning(false);
-    setEstimationData(null);
-
-    try {
-      const requestData: Partial<EstimationRequest> = {
-        sources: selectedSources,
-        compLogic,
-      };
-
-      if (activeTab === "image" && uploadedImage) {
-        requestData.image = await fileToBase64(uploadedImage);
-      } else if (activeTab === "description" && cardDescription.trim()) {
-        requestData.description = cardDescription.trim();
-      }
-
-      const { data, error } = await supabase.functions.invoke("estimate-card-value", {
-        body: requestData,
-      });
-
-      if (error) throw error;
-
-      if (data.success) {
-        setEstimationData(data);
-        const comps = data.comps || data.salesResults || [];
-        if (!data.estimatedValue && comps.length === 0) {
-          toast({
-            title: "No Results Found",
-            description: "No comps found, please try another image or description.",
-            variant: "destructive",
-          });
-          setResults([]);
-          setEstimatedValue(null);
-          setWarnings([]);
-          return;
-        }
-
-        const salesWithSelection = comps.map((result: any, index: number) => ({
-          id: result.id || `comp_${Date.now()}_${index}`,
-          title: result.title || "Unknown Card",
-          price: typeof result.price === "number" ? result.price : 0,
-          date: result.date || new Date().toISOString().split("T")[0],
-          source: result.source || "Unknown",
-          url: result.url || "#",
-          thumbnail: result.image || result.thumbnail,
-          selected: true,
-          type: result.type,
-          matchScore: result.matchScore || 0,
-        }));
-
-        setResults(salesWithSelection);
-        const estimatedVal = typeof data.estimatedValue === "string" ? parseFloat(data.estimatedValue.replace("$", "")) : typeof data.estimatedValue === "number" ? data.estimatedValue : null;
-        setEstimatedValue(estimatedVal);
-        setWarnings(data.warnings || []);
-        if (data.exactMatchFound === false) {
-          setShowExactMatchWarning(true);
-        }
-        toast({
-          title: "NEW ARCHITECTURE Analysis Complete",
-          description: `${comps.length} comparable sales found. Estimated value: ${estimatedVal ? `$${estimatedVal.toFixed(2)}` : "N/A"}`,
-        });
-      } else {
-        setEstimationData(data);
-        const errorMessage = data.details || "Failed to analyze the card. Please try again.";
-        if (data.traceId === "billing-disabled") {
-          toast({
-            title: "Google Vision API Billing Required",
-            description: "Please switch to the 'Describe Card' tab.",
-            variant: "destructive",
-          });
-          setActiveTab("description");
-        } else if (data.traceId === "vision-api-disabled") {
-            toast({
-              title: "Google Vision API Not Enabled",
-              description: "Please use the card description instead.",
-              variant: "destructive",
-            });
-            setActiveTab("description");
-        } else {
-          toast({
-            title: data.error || "Error",
-            description: errorMessage,
-            variant: "destructive",
-          });
-        }
-      }
-    } catch (error: any) {
-      toast({
-        title: "Service Error",
-        description: "There was an issue processing your request. Please try again or use the card description instead.",
-        variant: "destructive",
-      });
-      if (activeTab === "image") {
-        setActiveTab("description");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, [uploadedImage, cardDescription, selectedSources, compLogic, activeTab, fileToBase64]);
-
-  const canSubmit = (uploadedImage && activeTab === "image") || (cardDescription.trim() && activeTab === "description");
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50">
-      <div className="bg-white/80 backdrop-blur-sm border-b border-white/20 sticky top-0 z-10">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-center space-x-2">
-            <div className="p-2 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg">
-              <Sparkles className="h-6 w-6 text-white" />
-            </div>
-            <div className="text-center">
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                Trading Card Oracle
-              </h1>
-              <p className="text-xs text-blue-600 font-medium">Powered by Discover-then-Scrape Architecture v2.0</p>
-            </div>
-          </div>
-          <p className="text-center text-gray-600 mt-2">
-            Get instant value estimates for your trading cards using advanced discovery technology
-          </p>
-        </div>
-      </div>
-      <div className="container mx-auto px-4 py-8 max-w-6xl">
-        <ArchitectureStatus
-          isLoading={isLoading}
-          errors={estimationData?.errors}
-          warnings={warnings}
-          productionResponse={estimationData?.productionResponse}
-        />
-        {showExactMatchWarning && (
-          <Alert className="mb-4 border-blue-200 bg-blue-50">
-            <Info className="h-4 w-4 text-blue-600" />
-            <AlertDescription className="text-blue-800">
-              We couldn't find an exact match. Here are some similar cards using our enhanced discovery system.
-            </AlertDescription>
-          </Alert>
-        )}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          <div className="lg:col-span-2 space-y-6">
-            <Card className="bg-white/80 backdrop-blur-sm border-white/20 shadow-xl">
-              <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                  <TrendingUp className="h-5 w-5 text-blue-600" />
-                  <span>Card Input</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                  <TabsList className="grid w-full grid-cols-2 mb-6">
-                    <TabsTrigger value="image" className="flex items-center space-x-2">
-                      <span>📷</span>
-                      <span>Upload Image</span>
-                    </TabsTrigger>
-                    <TabsTrigger value="description" className="flex items-center space-x-2">
-                      <span>📝</span>
-                      <span>Describe Card</span>
-                    </TabsTrigger>
-                  </TabsList>
-                  <TabsContent value="image" className="space-y-4">
-                    <ImageUpload onImageUpload={setUploadedImage} uploadedImage={uploadedImage} />
-                  </TabsContent>
-                  <TabsContent value="description" className="space-y-4">
-                    <CardDescription description={cardDescription} onDescriptionChange={setCardDescription} />
-                  </TabsContent>
-                </Tabs>
-              </CardContent>
-            </Card>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <SourceSelection selectedSources={selectedSources} onSourcesChange={setSelectedSources} />
-              <CompLogicSelection compLogic={compLogic} onCompLogicChange={setCompLogic} />
-            </div>
-            <div className="flex justify-center">
-              <Button onClick={handleSubmit} disabled={!canSubmit || isLoading || selectedSources.length === 0} size="lg" className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white px-8 py-3 text-lg font-semibold shadow-lg hover:shadow-xl transition-all duration-300">
-                {isLoading ? (
-                  <div className="flex items-center space-x-2">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                    <span>Analyzing with NEW ARCHITECTURE...</span>
-                  </div>
-                ) : (
-                  "Estimate Value"
-                )}
-              </Button>
-            </div>
-            {estimationData && estimatedValue && (
-              <EstimationSummary
-                estimatedValue={estimatedValue}
-                confidence={estimationData.confidence || 0}
-                methodology={estimationData.methodology || "Standard Analysis"}
-                logicUsed={compLogic}
-                exactMatchFound={estimationData.exactMatchFound || false}
-                matchMessage={estimationData.matchMessage}
-                dataPoints={results.length}
-                priceRange={estimationData.priceRange}
-                productionResponse={estimationData.productionResponse}
-              />
-            )}
-          </div>
-          <div className="lg:col-span-1">
-            <ResultsDisplay
-              results={results}
-              estimatedValue={estimatedValue}
-              onResultToggle={handleResultToggle}
-              isLoading={isLoading}
-              logicUsed={compLogic}
-              warnings={warnings}
-            />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default Index;
+    
+  } catch (error) {
+    const processingTime = Date.now() - startTime;
+    logger.error('NEW ARCHITECTURE Unhandled error in main request handler', error, { processingTime });
+    
+    const errorResponse = createErrorResponse(
+      'An unexpected error occurred',
+      traceId,
+      [{ source: 'System', message: `Internal processing error: ${error.message}` }],
+      'Please try again later'
+    );
+    
+    return createJsonResponse(errorResponse, 500);
+  }
+});
