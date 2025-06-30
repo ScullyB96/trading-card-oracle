@@ -17,7 +17,7 @@ export async function fetchProductionComps(
   logger.info('Starting NEW robust data fetching process', { operation: 'fetchProductionComps' });
 
   if (!config.ebayAppId) {
-    throw new CardProcessingError('eBay API is not configured on the server.', 'EBAY_CONFIG_ERROR', 500);
+    throw new CardProcessingError('eBay API is not configured on the server. Please add the EBAY_APP_ID environment variable.', 'EBAY_CONFIG_ERROR', 500);
   }
 
   const querySet = generateSearchQueries(cardKeywords, logger);
