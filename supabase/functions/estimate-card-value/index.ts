@@ -1,8 +1,10 @@
+
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
 import { extractCardInfoFromImage, parseCardDescription, ExtractedCardInfo } from './vision-parser.ts';
 import { fetchProductionComps, SearchQuery, ProductionScraperResponse } from './sales-scrapers.ts';
+import { config } from './config.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -48,7 +50,6 @@ function createJsonResponse(data: object, status: number = 200) {
   });
 }
 
-
 serve(async (req) => {
   // --- This is the crucial part for fixing the CORS error ---
   if (req.method === 'OPTIONS') {
@@ -59,6 +60,12 @@ serve(async (req) => {
   
   try {
     const requestData: EstimationRequest = await req.json();
+    console.log('Received request:', { 
+      hasImage: !!requestData.image, 
+      hasDescription: !!requestData.description,
+      sources: requestData.sources,
+      compLogic: requestData.compLogic 
+    });
 
     // Input validation
     if (!requestData.sources || requestData.sources.length === 0) {
@@ -77,6 +84,15 @@ serve(async (req) => {
     // STEP 1: Extract/Parse Card Information
     try {
       if (requestData.image) {
+        // Check if Google Vision API is available
+        if (!config.googleVisionApiKey) {
+          return createJsonResponse({ 
+            success: false, 
+            error: 'Image processing is not available. Please use the card description instead.',
+            traceId: 'vision-api-disabled',
+            details: 'Google Vision API key is not configured'
+          }, 400);
+        }
         cardInfo = await extractCardInfoFromImage(requestData.image);
       } else {
         cardInfo = await parseCardDescription(requestData.description!.trim());
@@ -85,7 +101,8 @@ serve(async (req) => {
         return createJsonResponse({ success: false, error: 'Could not identify player from the provided input.' }, 400);
       }
     } catch (error) {
-       return createJsonResponse({ success: false, error: `Card Parsing Failed: ${error.message}` }, 500);
+      console.error('Card parsing error:', error);
+      return createJsonResponse({ success: false, error: `Card Parsing Failed: ${error.message}` }, 500);
     }
 
     const searchQuery: SearchQuery = {
@@ -97,6 +114,8 @@ serve(async (req) => {
       sport: cardInfo.sport
     };
 
+    console.log('Search query:', searchQuery);
+
     // STEP 2: Fetch and process sales data
     const productionResponse = await fetchProductionComps(
       searchQuery,
@@ -104,11 +123,21 @@ serve(async (req) => {
       requestData.compLogic
     );
     
+    console.log('Production response:', { 
+      success: productionResponse.success,
+      compsCount: productionResponse.comps?.length || 0,
+      estimatedValue: productionResponse.estimatedValue 
+    });
+    
     // Final successful response
     return createJsonResponse({ success: true, ...productionResponse }, 200);
 
   } catch (error) {
     console.error('=== UNHANDLED ERROR ===', error);
-    return createJsonResponse({ success: false, error: 'An unexpected error occurred.', details: error.message }, 500);
+    return createJsonResponse({ 
+      success: false, 
+      error: 'An unexpected error occurred.', 
+      details: error.message 
+    }, 500);
   }
 });

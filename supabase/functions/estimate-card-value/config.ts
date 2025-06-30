@@ -21,8 +21,9 @@ export interface AppConfig {
 
 export function loadConfiguration(): AppConfig {
   const config: AppConfig = {
-    googleVisionApiKey: Deno.env.get('GOOGLE_API_KEY') || '',
-    openaiApiKey: Deno.env.get('OPENAI_API_KEY') || '',
+    // Match the actual secret names in Supabase
+    googleVisionApiKey: Deno.env.get('Google API Key') || '',
+    openaiApiKey: Deno.env.get('OPEN AI KEY') || '',
     supabaseUrl: Deno.env.get('SUPABASE_URL') || '',
     supabaseAnonKey: Deno.env.get('SUPABASE_ANON_KEY') || '',
     timeout: {
@@ -37,13 +38,18 @@ export function loadConfiguration(): AppConfig {
     }
   };
 
-  // Validate required configuration
-  const requiredFields: Array<keyof AppConfig> = ['googleVisionApiKey', 'openaiApiKey', 'supabaseUrl', 'supabaseAnonKey'];
+  // Only validate critical configuration - allow some to be missing for graceful degradation
+  if (!config.supabaseUrl || !config.supabaseAnonKey) {
+    throw new ConfigurationError('Missing required Supabase configuration');
+  }
+
+  // Log warnings for missing optional configs instead of throwing errors
+  if (!config.googleVisionApiKey) {
+    console.warn('Google Vision API key not configured - image processing will be disabled');
+  }
   
-  for (const field of requiredFields) {
-    if (!config[field]) {
-      throw new ConfigurationError(`Missing required configuration: ${field}`);
-    }
+  if (!config.openaiApiKey) {
+    console.warn('OpenAI API key not configured - AI features may be limited');
   }
 
   return config;
