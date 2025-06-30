@@ -7,6 +7,7 @@ export interface AppConfig {
   openaiApiKey: string;
   googleSearchApiKey: string;
   googleSearchEngineId: string;
+  ebayAppId: string;
   supabaseUrl: string;
   supabaseAnonKey: string;
   timeout: {
@@ -34,6 +35,7 @@ export function loadConfiguration(): AppConfig {
     openaiApiKey: Deno.env.get("OPENAI_API_KEY") || "",
     googleSearchApiKey: Deno.env.get("Google Search_API_KEY") || "",
     googleSearchEngineId: Deno.env.get("Google Search_ENGINE_ID") || "",
+    ebayAppId: Deno.env.get("EBAY_APP_ID") || "",
     supabaseUrl: Deno.env.get("SUPABASE_URL") || "",
     supabaseAnonKey: Deno.env.get("SUPABASE_ANON_KEY") || "",
     timeout: {
@@ -71,7 +73,18 @@ export function loadConfiguration(): AppConfig {
     console.warn('OpenAI API key not configured - AI features may be limited');
   }
 
+  if (config.ebayAppId) {
+    console.log('✅ eBay Finding API configured successfully');
+  } else {
+    console.warn('eBay App ID not configured - eBay Finding API will be disabled');
+  }
+
   return config;
 }
 
 export const config = loadConfiguration();
+
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};

@@ -1,5 +1,6 @@
 import { EbayResult, EbayError } from './ebay-scraper.ts';
 import { Point130Result, Point130Error } from './130point-scraper.ts';
+import { EbayFindingResult, EbayFindingError } from './ebay-finding-scraper.ts';
 
 export interface NormalizedComp {
   title: string;
@@ -23,16 +24,18 @@ export interface NormalizationResult {
 
 export function combineAndNormalizeResults(
   ebayResult: { results: EbayResult[], error?: EbayError },
-  point130Result: { results: Point130Result[], error?: Point130Error }
+  point130Result: { results: Point130Result[], error?: Point130Error },
+  ebayFindingResult?: { results: EbayFindingResult[], error?: EbayFindingError }
 ): NormalizationResult {
   console.log('=== RESILIENT NORMALIZATION PROCESS ===');
   console.log(`eBay: ${ebayResult.results?.length || 0} results${ebayResult.error ? ' (with error)' : ''}`);
   console.log(`130Point: ${point130Result.results?.length || 0} results${point130Result.error ? ' (with error)' : ''}`);
+  console.log(`eBay Finding: ${ebayFindingResult?.results?.length || 0} results${ebayFindingResult?.error ? ' (with error)' : ''}`);
   
   const errors: ScrapingError[] = [];
   
   // Safely combine results with error tolerance
-  const allResults = safelyCombineResults(ebayResult, point130Result, errors);
+  const allResults = safelyCombineResults(ebayResult, point130Result, ebayFindingResult, errors);
   
   // Normalize and validate results with comprehensive error handling
   const normalizedResults = safelyNormalizeComps(allResults, errors);
@@ -51,10 +54,11 @@ export function combineAndNormalizeResults(
 function safelyCombineResults(
   ebayResult: { results: EbayResult[], error?: EbayError },
   point130Result: { results: Point130Result[], error?: Point130Error },
+  ebayFindingResult: { results: EbayFindingResult[], error?: EbayFindingError } | undefined,
   errors: ScrapingError[]
-): (EbayResult | Point130Result)[] {
+): (EbayResult | Point130Result | EbayFindingResult)[] {
   
-  const allResults: (EbayResult | Point130Result)[] = [];
+  const allResults: (EbayResult | Point130Result | EbayFindingResult)[] = [];
   
   // Safely add eBay results
   try {
@@ -92,10 +96,28 @@ function safelyCombineResults(
     });
   }
   
+  // Safely add eBay Finding results
+  try {
+    if (ebayFindingResult?.results && Array.isArray(ebayFindingResult.results)) {
+      allResults.push(...ebayFindingResult.results);
+    }
+    
+    if (ebayFindingResult?.error) {
+      errors.push(ebayFindingResult.error);
+      console.log('eBay Finding error collected:', ebayFindingResult.error.message);
+    }
+  } catch (error) {
+    console.error('Error processing eBay Finding results:', error);
+    errors.push({
+      source: 'eBay Finding',
+      message: `Failed to process eBay Finding results: ${error.message}`
+    });
+  }
+  
   return allResults;
 }
 
-function safelyNormalizeComps(resultsArray: (EbayResult | Point130Result)[], errors: ScrapingError[]): NormalizedComp[] {
+function safelyNormalizeComps(resultsArray: (EbayResult | Point130Result | EbayFindingResult)[], errors: ScrapingError[]): NormalizedComp[] {
   console.log(`🔄 Safely normalizing ${resultsArray.length} results`);
   
   const normalizedResults: NormalizedComp[] = [];
@@ -142,7 +164,7 @@ function safelyNormalizeComps(resultsArray: (EbayResult | Point130Result)[], err
   }
 }
 
-function safelyNormalizeResult(comp: EbayResult | Point130Result): NormalizedComp | null {
+function safelyNormalizeResult(comp: EbayResult | Point130Result | EbayFindingResult): NormalizedComp | null {
   try {
     // Validate and sanitize title
     const title = sanitizeTitle(comp.title);

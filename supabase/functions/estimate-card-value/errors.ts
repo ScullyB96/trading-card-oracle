@@ -7,6 +7,13 @@ export class CardProcessingError extends Error {
   }
 }
 
+export class CardEstimationError extends CardProcessingError {
+  constructor(message: string, code: string, public traceId?: string) {
+    super(message, code, 400);
+    this.name = 'CardEstimationError';
+  }
+}
+
 export class ImageParsingError extends CardProcessingError {
   constructor(message: string, public details?: any) {
     super(message, 'IMAGE_PARSING_ERROR', 400);
@@ -40,4 +47,51 @@ export class TimeoutError extends CardProcessingError {
     super(message, 'TIMEOUT_ERROR', 408);
     this.name = 'TimeoutError';
   }
+}
+
+export function handleError(error: any, traceId: string, logger?: any) {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  };
+
+  if (logger) {
+    logger.error('Request failed', error, { traceId });
+  }
+
+  // Handle specific error types
+  if (error instanceof CardEstimationError) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message,
+      code: error.code,
+      traceId: error.traceId || traceId
+    }), {
+      status: error.statusCode,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  if (error instanceof CardProcessingError) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message,
+      code: error.code,
+      traceId
+    }), {
+      status: error.statusCode,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  // Handle generic errors
+  return new Response(JSON.stringify({
+    success: false,
+    error: 'Internal server error',
+    code: 'INTERNAL_ERROR',
+    traceId
+  }), {
+    status: 500,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
 }
