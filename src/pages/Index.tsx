@@ -9,6 +9,8 @@ import { SourceSelection } from "@/components/SourceSelection";
 import { CompLogicSelection } from "@/components/CompLogicSelection";
 import { ResultsDisplay } from "@/components/ResultsDisplay";
 import { Sparkles, TrendingUp } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/components/ui/use-toast";
 
 export interface EstimationRequest {
   image?: File;
@@ -38,8 +40,31 @@ const Index = () => {
   const [results, setResults] = useState<SalesResult[]>([]);
   const [estimatedValue, setEstimatedValue] = useState<number | null>(null);
 
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+    });
+  };
+
   const handleSubmit = async () => {
     if (!uploadedImage && !cardDescription.trim()) {
+      toast({
+        title: "Input Required",
+        description: "Please upload an image or provide a card description.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (selectedSources.length === 0) {
+      toast({
+        title: "Sources Required",
+        description: "Please select at least one data source.",
+        variant: "destructive"
+      });
       return;
     }
 
@@ -51,46 +76,49 @@ const Index = () => {
       compLogic: compLogic
     });
 
-    // TODO: Replace with actual API call to edge function
-    // Simulate API call for now
-    setTimeout(() => {
-      const mockResults: SalesResult[] = [
-        {
-          id: "1",
-          title: "2023 Topps Chrome Rookie Card #123",
-          price: 124.99,
-          date: "2024-06-25",
-          source: "eBay",
-          url: "#",
-          thumbnail: "/placeholder.svg",
-          selected: true
-        },
-        {
-          id: "2",
-          title: "2023 Topps Chrome RC #123 PSA 10",
-          price: 189.50,
-          date: "2024-06-20",
-          source: "130point",
-          url: "#",
-          thumbnail: "/placeholder.svg",
-          selected: true
-        },
-        {
-          id: "3",
-          title: "Topps Chrome Rookie #123 BGS 9.5",
-          price: 156.00,
-          date: "2024-06-18",
-          source: "PWCC",
-          url: "#",
-          thumbnail: "/placeholder.svg",
-          selected: true
-        }
-      ];
-      
-      setResults(mockResults);
-      setEstimatedValue(156.83); // Average of selected results
+    try {
+      let requestData: any = {
+        sources: selectedSources,
+        compLogic: compLogic
+      };
+
+      if (activeTab === "image" && uploadedImage) {
+        const base64Image = await fileToBase64(uploadedImage);
+        requestData.image = base64Image;
+      } else if (activeTab === "description" && cardDescription.trim()) {
+        requestData.description = cardDescription.trim();
+      }
+
+      const { data, error } = await supabase.functions.invoke('estimate-card-value', {
+        body: requestData
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (data.success) {
+        setResults(data.salesResults);
+        setEstimatedValue(data.estimatedValue);
+        
+        toast({
+          title: "Analysis Complete",
+          description: `Found ${data.salesResults.length} comparable sales. Estimated value: $${data.estimatedValue.toFixed(2)}`,
+        });
+      } else {
+        throw new Error(data.error || 'Failed to estimate card value');
+      }
+
+    } catch (error) {
+      console.error('Error estimating card value:', error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to estimate card value. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
       setIsLoading(false);
-    }, 2000);
+    }
   };
 
   const canSubmit = (uploadedImage && activeTab === "image") || 
@@ -173,7 +201,7 @@ const Index = () => {
             <div className="flex justify-center">
               <Button 
                 onClick={handleSubmit}
-                disabled={!canSubmit || isLoading}
+                disabled={!canSubmit || isLoading || selectedSources.length === 0}
                 size="lg"
                 className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white px-8 py-3 text-lg font-semibold shadow-lg hover:shadow-xl transition-all duration-300"
               >
@@ -202,7 +230,13 @@ const Index = () => {
                 ));
                 
                 // Recalculate estimated value based on selected results
-                const selectedResults = results.filter(r => r.id === id ? !r.selected : r.selected);
+                const updatedResults = results.map(result => 
+                  result.id === id 
+                    ? { ...result, selected: !result.selected }
+                    : result
+                );
+                const selectedResults = updatedResults.filter(r => r.selected);
+                
                 if (selectedResults.length > 0) {
                   const total = selectedResults.reduce((sum, r) => sum + r.price, 0);
                   setEstimatedValue(Math.round((total / selectedResults.length) * 100) / 100);
