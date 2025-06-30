@@ -1,180 +1,148 @@
 
-export interface CalculationResult {
+import { Logger } from './logger.ts';
+
+export interface ValueResult {
   estimatedValue: number;
   confidence: number;
   methodology: string;
-  dataPoints: number;
-  priceRange: {
-    low: number;
-    high: number;
+  priceRange?: {
+    min: number;
+    max: number;
   };
 }
 
-export function calculateEstimatedValue(
-  salesResults: any[], 
+export interface SalesData {
+  title: string;
+  price: number;
+  date: string;
+  source: string;
+  url: string;
+  image?: string;
+  matchScore?: number;
+}
+
+export function calculateCardValue(
+  salesData: SalesData[],
   compLogic: string,
-  cardConfidence: number = 1.0
-): CalculationResult {
-  console.log('=== CALCULATING ESTIMATED VALUE ===');
-  console.log(`Logic: ${compLogic}, Results: ${salesResults.length}, Card Confidence: ${cardConfidence}`);
-  
-  const selectedResults = salesResults.filter(r => r.selected !== false);
-  console.log(`Selected results: ${selectedResults.length}`);
-  
-  if (selectedResults.length === 0) {
+  logger: Logger
+): ValueResult {
+  logger.info('Calculating card value', {
+    operation: 'calculateCardValue',
+    salesCount: salesData.length,
+    compLogic
+  });
+
+  if (!salesData || salesData.length === 0) {
     return {
       estimatedValue: 0,
       confidence: 0,
-      methodology: 'No data available',
-      dataPoints: 0,
-      priceRange: { low: 0, high: 0 }
+      methodology: 'No sales data available'
     };
   }
 
-  const prices = selectedResults.map(r => r.price).sort((a, b) => a - b);
-  const avgMatchScore = selectedResults.reduce((sum, r) => sum + (r.matchScore || 0.5), 0) / selectedResults.length;
-  
-  let estimatedValue = 0;
-  let methodology = '';
-  
-  try {
-    switch (compLogic) {
-      case 'lastSale':
-        const mostRecent = selectedResults.sort((a, b) => 
-          new Date(b.date).getTime() - new Date(a.date).getTime()
-        )[0];
-        estimatedValue = mostRecent.price;
-        methodology = 'Most Recent Sale';
-        break;
-      
-      case 'average3':
-        const recent3 = selectedResults
-          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-          .slice(0, 3);
-        estimatedValue = recent3.reduce((sum, r) => sum + r.price, 0) / recent3.length;
-        methodology = `Average of ${recent3.length} Most Recent Sales`;
-        break;
-      
-      case 'average5':
-        const recent5 = selectedResults
-          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-          .slice(0, 5);
-        estimatedValue = recent5.reduce((sum, r) => sum + r.price, 0) / recent5.length;
-        methodology = `Average of ${recent5.length} Most Recent Sales`;
-        break;
-      
-      case 'median':
-        const mid = Math.floor(prices.length / 2);
-        estimatedValue = prices.length % 2 === 0 
-          ? (prices[mid - 1] + prices[mid]) / 2
-          : prices[mid];
-        methodology = 'Median Price';
-        break;
-      
-      case 'mode':
-        estimatedValue = calculateModePrice(prices);
-        methodology = 'Most Common Price Range';
-        break;
-      
-      case 'conservative':
-        const index = Math.floor(prices.length * 0.25);
-        estimatedValue = prices[index];
-        methodology = 'Conservative Estimate (25th Percentile)';
-        break;
-      
-      default:
-        estimatedValue = prices.reduce((sum, price) => sum + price, 0) / prices.length;
-        methodology = 'Average of All Sales';
-        break;
+  // Sort by date (most recent first)
+  const sortedSales = salesData
+    .filter(sale => sale.price && sale.price > 0)
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  if (sortedSales.length === 0) {
+    return {
+      estimatedValue: 0,
+      confidence: 0,
+      methodology: 'No valid sales data'
+    };
+  }
+
+  const prices = sortedSales.map(sale => sale.price);
+  let estimatedValue: number;
+  let methodology: string;
+  let confidence: number;
+
+  switch (compLogic) {
+    case 'lastSale':
+      estimatedValue = sortedSales[0].price;
+      methodology = 'Last Sale Price';
+      confidence = sortedSales.length >= 3 ? 0.8 : 0.6;
+      break;
+
+    case 'average3':
+      const recent3 = sortedSales.slice(0, 3);
+      estimatedValue = recent3.reduce((sum, sale) => sum + sale.price, 0) / recent3.length;
+      methodology = `Average of ${recent3.length} Recent Sales`;
+      confidence = recent3.length >= 3 ? 0.85 : 0.7;
+      break;
+
+    case 'average5':
+      const recent5 = sortedSales.slice(0, 5);
+      estimatedValue = recent5.reduce((sum, sale) => sum + sale.price, 0) / recent5.length;
+      methodology = `Average of ${recent5.length} Recent Sales`;
+      confidence = recent5.length >= 5 ? 0.9 : 0.75;
+      break;
+
+    case 'median':
+      const sortedPrices = [...prices].sort((a, b) => a - b);
+      const mid = Math.floor(sortedPrices.length / 2);
+      estimatedValue = sortedPrices.length % 2 === 0 
+        ? (sortedPrices[mid - 1] + sortedPrices[mid]) / 2 
+        : sortedPrices[mid];
+      methodology = 'Median Price';
+      confidence = sortedPrices.length >= 5 ? 0.85 : 0.7;
+      break;
+
+    case 'conservative':
+      const sortedPricesAsc = [...prices].sort((a, b) => a - b);
+      const index = Math.floor(sortedPricesAsc.length * 0.25);
+      estimatedValue = sortedPricesAsc[index];
+      methodology = 'Conservative (25th Percentile)';
+      confidence = 0.9;
+      break;
+
+    case 'mode':
+      const ranges: { [key: string]: number[] } = {};
+      prices.forEach(price => {
+        const range = Math.floor(price / 20) * 20;
+        if (!ranges[range]) ranges[range] = [];
+        ranges[range].push(price);
+      });
+      const mostCommonRange = Object.values(ranges)
+        .reduce((max, current) => current.length > max.length ? current : max);
+      estimatedValue = mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length;
+      methodology = 'Most Common Price Range';
+      confidence = mostCommonRange.length >= 3 ? 0.8 : 0.65;
+      break;
+
+    default:
+      // Default to average of all sales
+      estimatedValue = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+      methodology = 'Average of All Sales';
+      confidence = prices.length >= 5 ? 0.8 : 0.6;
+  }
+
+  // Round to 2 decimal places
+  estimatedValue = Math.round(estimatedValue * 100) / 100;
+
+  // Calculate price range
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+
+  const result: ValueResult = {
+    estimatedValue,
+    confidence,
+    methodology,
+    priceRange: {
+      min: minPrice,
+      max: maxPrice
     }
-    
-    // Apply confidence adjustments
-    const dataQualityFactor = Math.min(1.0, selectedResults.length / 5); // More data = higher confidence
-    const matchQualityFactor = avgMatchScore;
-    const overallConfidence = cardConfidence * dataQualityFactor * matchQualityFactor;
-    
-    // Calculate price range
-    const priceRange = {
-      low: Math.min(...prices),
-      high: Math.max(...prices)
-    };
-    
-    // Round to 2 decimal places
-    estimatedValue = Math.round(estimatedValue * 100) / 100;
-    
-    console.log(`Calculated value: $${estimatedValue} (confidence: ${overallConfidence.toFixed(2)})`);
-    
-    return {
-      estimatedValue,
-      confidence: Math.round(overallConfidence * 100) / 100,
-      methodology,
-      dataPoints: selectedResults.length,
-      priceRange
-    };
-    
-  } catch (error) {
-    console.error('Error in value calculation:', error);
-    
-    // Fallback to simple average
-    const fallbackValue = prices.reduce((sum, price) => sum + price, 0) / prices.length;
-    
-    return {
-      estimatedValue: Math.round(fallbackValue * 100) / 100,
-      confidence: 0.3,
-      methodology: 'Simple Average (Calculation Error)',
-      dataPoints: selectedResults.length,
-      priceRange: {
-        low: Math.min(...prices),
-        high: Math.max(...prices)
-      }
-    };
-  }
-}
+  };
 
-function calculateModePrice(prices: number[]): number {
-  // Group prices into $20 ranges and find the most common range
-  const ranges: { [key: string]: number[] } = {};
-  
-  prices.forEach(price => {
-    const rangeKey = Math.floor(price / 20) * 20;
-    if (!ranges[rangeKey]) ranges[rangeKey] = [];
-    ranges[rangeKey].push(price);
+  logger.info('Card value calculation complete', {
+    operation: 'calculateCardValue',
+    result: {
+      estimatedValue: result.estimatedValue,
+      confidence: result.confidence,
+      methodology: result.methodology
+    }
   });
-  
-  const mostCommonRange = Object.values(ranges).reduce((max, current) => 
-    current.length > max.length ? current : max
-  );
-  
-  return mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length;
-}
 
-export function validatePriceConsistency(salesResults: any[]): string[] {
-  const warnings: string[] = [];
-  const prices = salesResults.map(r => r.price);
-  
-  if (prices.length < 2) return warnings;
-  
-  const avg = prices.reduce((sum, p) => sum + p, 0) / prices.length;
-  const stdDev = Math.sqrt(
-    prices.reduce((sum, p) => sum + Math.pow(p - avg, 2), 0) / prices.length
-  );
-  
-  // Check for high price variance
-  const coefficientOfVariation = stdDev / avg;
-  if (coefficientOfVariation > 0.5) {
-    warnings.push(`High price variance detected (${Math.round(coefficientOfVariation * 100)}% CV). Results may be less reliable.`);
-  }
-  
-  // Check for potential outliers
-  const outliers = prices.filter(p => Math.abs(p - avg) > 2 * stdDev);
-  if (outliers.length > 0) {
-    warnings.push(`${outliers.length} potential price outlier(s) detected. Consider reviewing individual sales.`);
-  }
-  
-  // Check for very low sample size
-  if (prices.length < 3) {
-    warnings.push('Limited sales data available. Estimate may be less accurate.');
-  }
-  
-  return warnings;
+  return result;
 }
