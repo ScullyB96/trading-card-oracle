@@ -1,4 +1,3 @@
-
 import { NormalizedComp } from './normalizer.ts';
 import { SearchQuery } from '../sales-scrapers.ts';
 
@@ -23,30 +22,35 @@ export interface CompingResult {
 export function findRelevantMatches(
   comps: NormalizedComp[],
   searchQuery: SearchQuery,
-  minRelevanceScore: number = 0.6
+  minRelevanceScore: number = 0.5
 ): MatchResult {
-  console.log('=== FINDING RELEVANT MATCHES ===');
+  console.log('=== FINDING RELEVANT MATCHES WITH ENHANCED SCORING ===');
   console.log(`Analyzing ${comps.length} comps for relevance`);
   
-  // Add match scores to all comps
+  // Add enhanced match scores to all comps
   const scoredComps = comps.map(comp => ({
     ...comp,
-    matchScore: calculateMatchScore(comp, searchQuery)
+    matchScore: calculateEnhancedMatchScore(comp, searchQuery)
   }));
   
-  // Sort by match score and recency
+  // Sort by match score and recency with better weighting
   const sortedComps = scoredComps.sort((a, b) => {
     const scoreDiff = b.matchScore - a.matchScore;
-    if (Math.abs(scoreDiff) > 0.1) return scoreDiff;
+    if (Math.abs(scoreDiff) > 0.05) return scoreDiff;
     
-    // If scores are similar, sort by recency
-    return new Date(b.date).getTime() - new Date(a.date).getTime();
+    // If scores are very similar, prefer more recent sales
+    const dateA = new Date(a.date).getTime();
+    const dateB = new Date(b.date).getTime();
+    return dateB - dateA;
   });
   
-  // Determine match quality
-  const exactMatches = sortedComps.filter(comp => comp.matchScore >= 0.9);
-  const partialMatches = sortedComps.filter(comp => comp.matchScore >= 0.7);
+  // Enhanced thresholds for better matching
+  const exactMatches = sortedComps.filter(comp => comp.matchScore >= 0.85);
+  const strongMatches = sortedComps.filter(comp => comp.matchScore >= 0.70);
+  const partialMatches = sortedComps.filter(comp => comp.matchScore >= 0.55);
   const fuzzyMatches = sortedComps.filter(comp => comp.matchScore >= minRelevanceScore);
+  
+  console.log(`Match distribution: Exact=${exactMatches.length}, Strong=${strongMatches.length}, Partial=${partialMatches.length}, Fuzzy=${fuzzyMatches.length}`);
   
   let matchResult: MatchResult;
   
@@ -56,34 +60,41 @@ export function findRelevantMatches(
       relevantComps: exactMatches.slice(0, 20),
       matchQuality: 'exact'
     };
+  } else if (strongMatches.length > 0) {
+    matchResult = {
+      exactMatchFound: false,
+      relevantComps: strongMatches.slice(0, 20),
+      matchQuality: 'partial',
+      matchMessage: `Found ${strongMatches.length} strong matches for your card.`
+    };
   } else if (partialMatches.length > 0) {
     matchResult = {
       exactMatchFound: false,
-      relevantComps: partialMatches.slice(0, 20),
-      matchQuality: 'partial',
-      matchMessage: `Found ${partialMatches.length} partial matches based on your description.`
+      relevantComps: partialMatches.slice(0, 15),
+      matchQuality: 'fuzzy',
+      matchMessage: `Found ${partialMatches.length} partial matches. Results may be less accurate.`
     };
   } else if (fuzzyMatches.length > 0) {
     matchResult = {
       exactMatchFound: false,
-      relevantComps: fuzzyMatches.slice(0, 15),
-      matchQuality: 'fuzzy',
-      matchMessage: `No exact matches found. Showing ${fuzzyMatches.length} similar cards that may be relevant.`
+      relevantComps: fuzzyMatches.slice(0, 10),
+      matchQuality: 'fallback',
+      matchMessage: `Found ${fuzzyMatches.length} similar cards, but no close matches for your specific card.`
     };
   } else {
     matchResult = {
       exactMatchFound: false,
-      relevantComps: sortedComps.slice(0, 10),
+      relevantComps: [],
       matchQuality: 'fallback',
-      matchMessage: 'No exact matches found, but here are close comps based on your description.'
+      matchMessage: 'No relevant matches found. Try a different search or check the card details.'
     };
   }
   
-  console.log(`Match result: ${matchResult.matchQuality} (${matchResult.relevantComps.length} comps)`);
+  console.log(`Enhanced match result: ${matchResult.matchQuality} (${matchResult.relevantComps.length} comps)`);
   return matchResult;
 }
 
-function calculateMatchScore(comp: NormalizedComp, query: SearchQuery): number {
+function calculateEnhancedMatchScore(comp: NormalizedComp, query: SearchQuery): number {
   const title = comp.title.toLowerCase();
   const player = query.player.toLowerCase();
   const year = query.year;
@@ -94,17 +105,11 @@ function calculateMatchScore(comp: NormalizedComp, query: SearchQuery): number {
   let score = 0;
   let maxScore = 0;
   
-  // Player name matching (most important - 40% weight)
-  maxScore += 0.4;
+  // Player name matching (35% weight) - most critical
+  maxScore += 0.35;
   if (player && player !== 'unknown') {
-    if (title.includes(player)) {
-      score += 0.4;
-    } else {
-      // Check for partial name matches
-      const playerParts = player.split(' ');
-      const matchedParts = playerParts.filter(part => title.includes(part));
-      score += (matchedParts.length / playerParts.length) * 0.3;
-    }
+    const playerScore = calculatePlayerNameMatch(title, player);
+    score += playerScore * 0.35;
   }
   
   // Year matching (25% weight)
@@ -112,26 +117,31 @@ function calculateMatchScore(comp: NormalizedComp, query: SearchQuery): number {
   if (year && year !== 'unknown') {
     if (title.includes(year)) {
       score += 0.25;
+    } else {
+      // Check for adjacent years (for rookie cards that span years)
+      const yearNum = parseInt(year);
+      if (!isNaN(yearNum)) {
+        for (let i = -1; i <= 1; i++) {
+          if (title.includes(String(yearNum + i))) {
+            score += 0.15; // Partial credit for adjacent years
+            break;
+          }
+        }
+      }
     }
   }
   
-  // Set matching (20% weight)
+  // Set matching (20% weight) with fuzzy matching
   maxScore += 0.2;
   if (set && set !== 'unknown') {
-    if (title.includes(set)) {
-      score += 0.2;
-    } else {
-      // Check for partial set name matches
-      const setWords = set.split(' ');
-      const matchedWords = setWords.filter(word => title.includes(word));
-      score += (matchedWords.length / setWords.length) * 0.15;
-    }
+    const setScore = calculateSetMatch(title, set);
+    score += setScore * 0.2;
   }
   
   // Card number matching (10% weight)
   maxScore += 0.1;
   if (cardNumber && cardNumber !== 'unknown') {
-    if (title.includes(cardNumber) || title.includes(`#${cardNumber}`)) {
+    if (title.includes(cardNumber) || title.includes(`#${cardNumber}`) || title.includes(`no. ${cardNumber}`)) {
       score += 0.1;
     }
   }
@@ -144,8 +154,134 @@ function calculateMatchScore(comp: NormalizedComp, query: SearchQuery): number {
     }
   }
   
+  // Bonus factors (5% weight total)
+  maxScore += 0.05;
+  
+  // Rookie card bonus
+  const queryHasRC = query.set.toLowerCase().includes('rookie') || query.player.toLowerCase().includes('rookie');
+  const titleHasRC = title.includes('rc') || title.includes('rookie');
+  if (queryHasRC && titleHasRC) {
+    score += 0.02;
+  }
+  
+  // Variation match bonus (Silver, Gold, Chrome, etc.)
+  const variations = extractVariations(query.set);
+  for (const variation of variations) {
+    if (title.includes(variation.toLowerCase())) {
+      score += 0.01;
+      break;
+    }
+  }
+  
+  // Recent card bonus (cards from 2020+)
+  if (year && parseInt(year) >= 2020) {
+    score += 0.02;
+  }
+  
   // Normalize score to 0-1 range
-  return maxScore > 0 ? Math.min(1.0, score / maxScore) : 0;
+  const normalizedScore = maxScore > 0 ? Math.min(1.0, score / maxScore) : 0;
+  
+  // Apply additional penalties for obviously wrong matches
+  if (player !== 'unknown' && !title.includes(player.split(' ')[0])) {
+    return Math.max(0, normalizedScore - 0.3); // Heavy penalty for wrong player
+  }
+  
+  return normalizedScore;
+}
+
+function calculatePlayerNameMatch(title: string, player: string): number {
+  const playerParts = player.split(' ').filter(part => part.length > 1);
+  let matchScore = 0;
+  
+  // Check for full name match
+  if (title.includes(player)) {
+    return 1.0;
+  }
+  
+  // Check for individual name parts
+  const matchedParts = playerParts.filter(part => title.includes(part));
+  
+  if (matchedParts.length === playerParts.length) {
+    matchScore = 0.9; // All parts found separately
+  } else if (matchedParts.length > 0) {
+    matchScore = (matchedParts.length / playerParts.length) * 0.7;
+  }
+  
+  // Bonus for last name match (most important)
+  const lastName = playerParts[playerParts.length - 1];
+  if (lastName && title.includes(lastName)) {
+    matchScore = Math.max(matchScore, 0.6);
+  }
+  
+  return matchScore;
+}
+
+function calculateSetMatch(title: string, set: string): number {
+  // Direct match
+  if (title.includes(set)) {
+    return 1.0;
+  }
+  
+  // Check for set variations and synonyms
+  const setVariations = getSetVariations(set);
+  for (const variation of setVariations) {
+    if (title.includes(variation)) {
+      return 0.8;
+    }
+  }
+  
+  // Check for individual set words
+  const setWords = set.split(' ').filter(word => word.length > 2);
+  const matchedWords = setWords.filter(word => title.includes(word));
+  
+  if (matchedWords.length > 0) {
+    return (matchedWords.length / setWords.length) * 0.6;
+  }
+  
+  return 0;
+}
+
+function getSetVariations(set: string): string[] {
+  const variations: string[] = [];
+  const setLower = set.toLowerCase();
+  
+  // Prizm variations
+  if (setLower.includes('prizm')) {
+    variations.push('prizm', 'panini prizm');
+    if (setLower.includes('silver')) {
+      variations.push('silver prizm', 'prizm silver', 'silver');
+    }
+    if (setLower.includes('gold')) {
+      variations.push('gold prizm', 'prizm gold');
+    }
+  }
+  
+  // Chrome variations
+  if (setLower.includes('chrome')) {
+    variations.push('chrome', 'topps chrome', 'bowman chrome');
+  }
+  
+  // Optic variations
+  if (setLower.includes('optic')) {
+    variations.push('optic', 'panini optic');
+  }
+  
+  return variations;
+}
+
+function extractVariations(setName: string): string[] {
+  const variations: string[] = [];
+  const setLower = setName.toLowerCase();
+  
+  const variationTerms = ['silver', 'gold', 'red', 'blue', 'green', 'purple', 'orange', 'chrome', 'refractor', 'prizm', 'parallel'];
+  
+  for (const term of variationTerms) {
+    if (setLower.includes(term)) {
+      variations.push(term);
+    }
+  }
+  
+  return variations;
 }
 
 export function calculateCompValue(

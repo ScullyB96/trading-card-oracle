@@ -1,4 +1,3 @@
-
 import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
 import { fetch130PointComps } from './scrapers/130point-scraper.ts';
 import { combineAndNormalizeResults, NormalizedComp, ScrapingError } from './scrapers/normalizer.ts';
@@ -54,93 +53,79 @@ export async function fetchRealSalesData(query: SearchQuery, sources: string[]):
   console.log('Sources:', sources);
   
   try {
-    // Build search query string
-    const searchQuery = buildSearchQuery(query);
-    console.log('Built search query:', searchQuery);
+    // Build tiered search queries for better matching
+    const searchQueries = buildTieredSearchQueries(query);
+    console.log('Built tiered search queries:', searchQueries);
     
-    if (!searchQuery.trim()) {
-      throw new Error('Invalid search query - no searchable terms found');
-    }
-    
-    // Fetch from real sources in parallel
-    const fetchPromises: Promise<any>[] = [];
-    
-    if (sources.includes('ebay')) {
-      fetchPromises.push(fetchEbayComps(searchQuery));
-    }
-    
-    if (sources.includes('130point')) {
-      fetchPromises.push(fetch130PointComps(searchQuery));
-    }
-    
-    if (fetchPromises.length === 0) {
-      throw new Error('No valid sources selected');
-    }
-    
-    // Wait for all scrapers to complete
-    const results = await Promise.allSettled(fetchPromises);
-    
-    let ebayResult = { results: [], error: undefined };
-    let point130Result = { results: [], error: undefined };
-    
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        if (sources.includes('ebay') && (index === 0 || (index === 1 && !sources.includes('ebay')))) {
-          ebayResult = result.value;
-        }
-        if (sources.includes('130point')) {
-          const point130Index = sources.includes('ebay') ? 1 : 0;
-          if (index === point130Index) {
-            point130Result = result.value;
-          }
-        }
-      } else {
-        console.error(`Source ${sources[index]} failed:`, result.reason);
-        const error = {
-          source: sources[index],
-          message: result.reason?.message || 'Unknown error'
-        };
-        
-        if (sources[index] === 'ebay') {
-          ebayResult.error = error;
-        } else if (sources[index] === '130point') {
-          point130Result.error = error;
-        }
+    // Try queries in order of specificity
+    for (const searchQuery of searchQueries) {
+      console.log(`Trying search query: "${searchQuery}"`);
+      
+      // Fetch from real sources in parallel
+      const fetchPromises: Promise<any>[] = [];
+      
+      if (sources.includes('ebay')) {
+        fetchPromises.push(fetchEbayComps(searchQuery));
       }
-    });
-    
-    // Combine and normalize results
-    const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
-    
-    if (normalizationResult.comps.length === 0 && normalizationResult.errors.length > 0) {
-      // All sources failed
-      const errorMessages = normalizationResult.errors.map(e => `${e.source}: ${e.message}`).join('; ');
-      throw new Error(`All data sources failed: ${errorMessages}`);
+      
+      if (sources.includes('130point')) {
+        fetchPromises.push(fetch130PointComps(searchQuery));
+      }
+      
+      if (fetchPromises.length === 0) {
+        continue;
+      }
+      
+      // Wait for all scrapers to complete
+      const results = await Promise.allSettled(fetchPromises);
+      
+      let ebayResult = { results: [], error: undefined };
+      let point130Result = { results: [], error: undefined };
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          if (sources.includes('ebay') && (index === 0 || (index === 1 && !sources.includes('ebay')))) {
+            ebayResult = result.value;
+          }
+          if (sources.includes('130point')) {
+            const point130Index = sources.includes('ebay') ? 1 : 0;
+            if (index === point130Index) {
+              point130Result = result.value;
+            }
+          }
+        } else {
+          console.error(`Source ${sources[index]} failed:`, result.reason);
+        }
+      });
+      
+      // Combine and normalize results
+      const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+      
+      // If we found results with this query, use them
+      if (normalizationResult.comps.length > 0) {
+        // Find relevant matches
+        const matchResult = findRelevantMatches(normalizationResult.comps, query, 0.6);
+        
+        // Convert to SalesResult format for compatibility
+        const salesResults = matchResult.relevantComps.map((comp, index) => ({
+          id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
+          title: comp.title,
+          price: comp.price,
+          date: comp.date,
+          source: comp.source,
+          url: comp.url,
+          thumbnail: comp.image,
+          matchScore: comp.matchScore || 0.5,
+          selected: true
+        }));
+        
+        console.log(`Found ${salesResults.length} relevant sales with query: "${searchQuery}"`);
+        return salesResults;
+      }
     }
     
-    // Find relevant matches
-    const matchResult = findRelevantMatches(normalizationResult.comps, query, 0.6);
-    
-    // Convert to SalesResult format for compatibility
-    const salesResults = matchResult.relevantComps.map((comp, index) => ({
-      id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
-      title: comp.title,
-      price: comp.price,
-      date: comp.date,
-      source: comp.source,
-      url: comp.url,
-      thumbnail: comp.image,
-      matchScore: comp.matchScore || 0.5,
-      selected: true
-    }));
-    
-    console.log(`Found ${salesResults.length} relevant sales across all sources`);
-    
-    if (salesResults.length === 0) {
-      throw new Error('No relevant sales data found for this card');
-    }
-    
-    return salesResults;
+    // If no queries returned results, throw error
+    throw new Error('No relevant sales data found for any search variation');
     
   } catch (error) {
     console.error('Production scraper error:', error);
@@ -156,13 +141,9 @@ export async function fetchProductionComps(
   console.log('=== FETCHING PRODUCTION COMPS ===');
   
   try {
-    // Build search query string
-    const searchQuery = buildSearchQuery(query);
-    console.log('Search query:', searchQuery);
-    
-    if (!searchQuery.trim()) {
-      throw new Error('Invalid search query - no searchable terms found');
-    }
+    // Build tiered search queries for comprehensive matching
+    const searchQueries = buildTieredSearchQueries(query);
+    console.log('Tiered search queries:', searchQueries);
     
     // Validate sources
     const validSources = sources.filter(s => ['ebay', '130point'].includes(s));
@@ -170,81 +151,85 @@ export async function fetchProductionComps(
       throw new Error('No valid sources selected');
     }
     
-    // Fetch from real sources
-    const fetchPromises: Promise<any>[] = [];
+    let allComps: NormalizedComp[] = [];
+    let allErrors: Array<{ source: string; message: string }> = [];
     
-    if (validSources.includes('ebay')) {
-      fetchPromises.push(fetchEbayComps(searchQuery));
-    }
-    
-    if (validSources.includes('130point')) {
-      fetchPromises.push(fetch130PointComps(searchQuery));
-    }
-    
-    const results = await Promise.allSettled(fetchPromises);
-    
-    let ebayResult = { results: [], error: undefined };
-    let point130Result = { results: [], error: undefined };
-    
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        if (validSources.includes('ebay') && index === 0) {
-          ebayResult = result.value;
-        } else if (validSources.includes('130point')) {
-          const point130Index = validSources.includes('ebay') ? 1 : 0;
-          if (index === point130Index) {
-            point130Result = result.value;
-          }
-        }
-      } else {
-        console.error(`Source failed:`, result.reason);
-        const error = {
-          source: validSources[index] || 'unknown',
-          message: result.reason?.message || 'Unknown error'
-        };
-        
-        if (index === 0 && validSources.includes('ebay')) {
-          ebayResult.error = error;
-        } else if (validSources.includes('130point')) {
-          point130Result.error = error;
-        }
+    // Try each search query until we find good results
+    for (const searchQuery of searchQueries) {
+      console.log(`Attempting search with: "${searchQuery}"`);
+      
+      // Fetch from real sources
+      const fetchPromises: Promise<any>[] = [];
+      
+      if (validSources.includes('ebay')) {
+        fetchPromises.push(fetchEbayComps(searchQuery));
       }
-    });
-    
-    // Combine and normalize results
-    const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+      
+      if (validSources.includes('130point')) {
+        fetchPromises.push(fetch130PointComps(searchQuery));
+      }
+      
+      const results = await Promise.allSettled(fetchPromises);
+      
+      let ebayResult = { results: [], error: undefined };
+      let point130Result = { results: [], error: undefined };
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          if (validSources.includes('ebay') && index === 0) {
+            ebayResult = result.value;
+          } else if (validSources.includes('130point')) {
+            const point130Index = validSources.includes('ebay') ? 1 : 0;
+            if (index === point130Index) {
+              point130Result = result.value;
+            }
+          }
+        } else {
+          console.error(`Source failed:`, result.reason);
+          const error = {
+            source: validSources[index] || 'unknown',
+            message: result.reason?.message || 'Unknown error'
+          };
+          allErrors.push(error);
+        }
+      });
+      
+      // Combine and normalize results for this query
+      const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+      
+      // Add to our collection of all comps
+      allComps = allComps.concat(normalizationResult.comps);
+      allErrors = allErrors.concat(normalizationResult.errors);
+      
+      // If we found good results, we can stop trying more queries
+      if (normalizationResult.comps.length >= 5) {
+        console.log(`Found sufficient comps (${normalizationResult.comps.length}) with query: "${searchQuery}"`);
+        break;
+      }
+    }
     
     // Check if we have any data at all
-    if (normalizationResult.comps.length === 0) {
-      if (normalizationResult.errors.length > 0) {
-        // All sources failed
-        return {
-          estimatedValue: '$0.00',
-          logicUsed: compLogic,
-          exactMatchFound: false,
-          confidence: 0,
-          methodology: 'No data available',
-          matchMessage: 'All data sources failed to return results',
-          comps: [],
-          errors: normalizationResult.errors
-        };
-      } else {
-        // No results found
-        return {
-          estimatedValue: '$0.00',
-          logicUsed: compLogic,
-          exactMatchFound: false,
-          confidence: 0,
-          methodology: 'No data available',
-          matchMessage: 'No sales data found for this card',
-          comps: [],
-          errors: []
-        };
-      }
+    if (allComps.length === 0) {
+      return {
+        estimatedValue: '$0.00',
+        logicUsed: compLogic,
+        exactMatchFound: false,
+        confidence: 0,
+        methodology: 'No data available',
+        matchMessage: allErrors.length > 0 
+          ? 'All data sources failed to return results'
+          : 'No sales data found for this card across all search variations',
+        comps: [],
+        errors: allErrors
+      };
     }
     
+    // Remove duplicates based on title and price similarity
+    const uniqueComps = deduplicateComps(allComps);
+    console.log(`Deduplicated ${allComps.length} -> ${uniqueComps.length} comps`);
+    
     // Find relevant matches
-    const matchResult = findRelevantMatches(normalizationResult.comps, query);
+    const matchResult = findRelevantMatches(uniqueComps, query);
     
     // Calculate estimated value
     const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
@@ -265,7 +250,7 @@ export async function fetchProductionComps(
         image: comp.image,
         url: comp.url
       })),
-      errors: normalizationResult.errors
+      errors: allErrors
     };
     
     console.log('Production scraper response:', {
@@ -294,6 +279,111 @@ export async function fetchProductionComps(
       }]
     };
   }
+}
+
+function buildTieredSearchQueries(query: SearchQuery): string[] {
+  const queries: string[] = [];
+  
+  // Extract non-empty, meaningful parts
+  const parts = {
+    year: query.year && query.year !== 'unknown' ? query.year : '',
+    player: query.player && query.player !== 'unknown' ? query.player : '',
+    set: query.set && query.set !== 'unknown' ? query.set : '',
+    cardNumber: query.cardNumber && query.cardNumber !== 'unknown' ? query.cardNumber : '',
+    grade: query.grade && query.grade !== 'unknown' ? query.grade : '',
+    sport: query.sport && query.sport !== 'unknown' && query.sport !== 'other' ? query.sport : ''
+  };
+  
+  // Tier 1: Most specific - all available fields
+  if (parts.year && parts.player && parts.set) {
+    const tier1Parts = [
+      parts.year,
+      parts.set,
+      parts.player,
+      parts.cardNumber ? `#${parts.cardNumber}` : '',
+      parts.grade || '',
+      parts.sport
+    ].filter(p => p.trim());
+    
+    queries.push(tier1Parts.join(' ').replace(/\s+/g, ' ').trim());
+  }
+  
+  // Tier 2: Core card info without grade
+  if (parts.year && parts.player && parts.set) {
+    const tier2Parts = [
+      parts.year,
+      parts.set,
+      parts.player,
+      parts.cardNumber ? `#${parts.cardNumber}` : '',
+      parts.sport
+    ].filter(p => p.trim());
+    
+    queries.push(tier2Parts.join(' ').replace(/\s+/g, ' ').trim());
+  }
+  
+  // Tier 3: Player + set + key terms (for variations like Silver Prizm) 
+  if (parts.player && parts.set) {
+    const setVariations = extractSetVariations(parts.set);
+    for (const setVar of setVariations) {
+      const tier3Parts = [
+        parts.player,
+        setVar,
+        parts.cardNumber ? `#${parts.cardNumber}` : '',
+        'RC' // Add rookie card indicator
+      ].filter(p => p.trim());
+      
+      queries.push(tier3Parts.join(' ').replace(/\s+/g, ' ').trim());
+    }
+  }
+  
+  // Tier 4: Broad player + year search
+  if (parts.player && parts.year) {
+    queries.push(`${parts.player} ${parts.year} ${parts.sport || ''} rookie card`.replace(/\s+/g, ' ').trim());
+  }
+  
+  // Remove duplicates and empty queries
+  const uniqueQueries = [...new Set(queries)].filter(q => q.length > 10);
+  
+  console.log(`Built ${uniqueQueries.length} tiered search queries`);
+  return uniqueQueries;
+}
+
+function extractSetVariations(setName: string): string[] {
+  const variations = [setName];
+  
+  // Handle common set variations
+  if (setName.toLowerCase().includes('prizm')) {
+    if (setName.toLowerCase().includes('silver')) {
+      variations.push('Prizm Silver', 'Silver Prizm', 'Panini Prizm Silver');
+    }
+    if (setName.toLowerCase().includes('panini')) {
+      variations.push('Panini Prizm', 'Prizm');
+    }
+  }
+  
+  if (setName.toLowerCase().includes('chrome')) {
+    variations.push('Chrome', 'Topps Chrome', 'Bowman Chrome');
+  }
+  
+  return [...new Set(variations)];
+}
+
+function deduplicateComps(comps: NormalizedComp[]): NormalizedComp[] {
+  const seen = new Set<string>();
+  const unique: NormalizedComp[] = [];
+  
+  for (const comp of comps) {
+    // Create a signature based on title similarity and price
+    const titleWords = comp.title.toLowerCase().split(/\s+/).sort();
+    const signature = `${titleWords.slice(0, 5).join('')}_${Math.round(comp.price)}`;
+    
+    if (!seen.has(signature)) {
+      seen.add(signature);
+      unique.push(comp);
+    }
+  }
+  
+  return unique;
 }
 
 function buildSearchQuery(query: SearchQuery): string {

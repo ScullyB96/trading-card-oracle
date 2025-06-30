@@ -21,19 +21,23 @@ export async function extractCardInfoFromImage(base64Image: string): Promise<Ext
     // Clean base64 data
     const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
     
-    // First pass - standard OCR
-    let extractedText = await performVisionOCR(googleApiKey, imageData);
+    // First pass - standard OCR with enhanced settings
+    let extractedText = await performEnhancedVisionOCR(googleApiKey, imageData);
     
-    // Second pass - enhanced OCR for low confidence results
+    // Second pass - document OCR for low confidence results
     if (extractedText.length < 20) {
-      console.log('Low text extraction, trying enhanced OCR');
-      extractedText = await performEnhancedVisionOCR(googleApiKey, imageData);
+      console.log('Low text extraction, trying document OCR');
+      extractedText = await performDocumentOCR(googleApiKey, imageData);
     }
     
     console.log('Raw extracted text:', extractedText);
     
+    // Apply post-OCR cleanup
+    const cleanedText = cleanupOCRText(extractedText);
+    console.log('Cleaned OCR text:', cleanedText);
+    
     // Parse the extracted text into structured data
-    return await parseExtractedText(extractedText);
+    return await parseExtractedText(cleanedText);
     
   } catch (error) {
     console.error('Vision OCR failed:', error);
@@ -41,7 +45,8 @@ export async function extractCardInfoFromImage(base64Image: string): Promise<Ext
   }
 }
 
-async function performVisionOCR(apiKey: string, imageData: string): Promise<string> {
+async function performEnhancedVisionOCR(apiKey: string, imageData: string): Promise<string> {
+  // Enhanced OCR with preprocessing hints for card images
   const response = await fetch(
     `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
     {
@@ -51,9 +56,21 @@ async function performVisionOCR(apiKey: string, imageData: string): Promise<stri
         requests: [{
           image: { content: imageData },
           features: [
-            { type: 'TEXT_DETECTION', maxResults: 10 },
-            { type: 'DOCUMENT_TEXT_DETECTION', maxResults: 5 }
-          ]
+            { 
+              type: 'TEXT_DETECTION', 
+              maxResults: 15
+            },
+            { 
+              type: 'DOCUMENT_TEXT_DETECTION', 
+              maxResults: 10
+            }
+          ],
+          imageContext: {
+            textDetectionParams: {
+              enableTextDetectionConfidenceScore: true
+            },
+            languageHints: ['en']
+          }
         }]
       })
     }
@@ -75,15 +92,18 @@ async function performVisionOCR(apiKey: string, imageData: string): Promise<stri
   
   if (data.responses?.[0]?.fullTextAnnotation?.text) {
     extractedText = data.responses[0].fullTextAnnotation.text;
-  } else if (data.responses?.[0]?.textAnnotations?.[0]?.description) {
-    extractedText = data.responses[0].textAnnotations[0].description;
+  } else if (data.responses?.[0]?.textAnnotations?.length > 0) {
+    // Combine individual text annotations
+    extractedText = data.responses[0].textAnnotations
+      .map((annotation: any) => annotation.description)
+      .join(' ');
   }
   
   return extractedText || '';
 }
 
-async function performEnhancedVisionOCR(apiKey: string, imageData: string): Promise<string> {
-  // Enhanced OCR with preprocessing hints for card images
+async function performDocumentOCR(apiKey: string, imageData: string): Promise<string> {
+  // Document-focused OCR for challenging card images
   const response = await fetch(
     `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
     {
@@ -95,12 +115,15 @@ async function performEnhancedVisionOCR(apiKey: string, imageData: string): Prom
           features: [
             { 
               type: 'DOCUMENT_TEXT_DETECTION', 
-              maxResults: 10,
+              maxResults: 20
             }
           ],
           imageContext: {
             textDetectionParams: {
-              enableTextDetectionConfidenceScore: true
+              enableTextDetectionConfidenceScore: true,
+              advancedOcrOptions: [
+                'LEGACY_LAYOUT'
+              ]
             }
           }
         }]
@@ -109,11 +132,57 @@ async function performEnhancedVisionOCR(apiKey: string, imageData: string): Prom
   );
 
   if (!response.ok) {
-    throw new Error(`Enhanced Vision API failed: ${response.status}`);
+    throw new Error(`Document OCR failed: ${response.status}`);
   }
 
   const data = await response.json();
   return data.responses?.[0]?.fullTextAnnotation?.text || '';
+}
+
+function cleanupOCRText(rawText: string): string {
+  if (!rawText) return '';
+  
+  let cleaned = rawText;
+  
+  // Normalize common card terms and variations
+  const cardTermNormalizations = [
+    // Prizm variations
+    [/PRIZM\s*SILVER|SILVER\s*PRIZM/gi, 'Silver Prizm'],
+    [/PRIZM\s*GOLD|GOLD\s*PRIZM/gi, 'Gold Prizm'],
+    [/PRIZM\s*RED|RED\s*PRIZM/gi, 'Red Prizm'],
+    [/PRIZM\s*BLUE|BLUE\s*PRIZM/gi, 'Blue Prizm'],
+    
+    // Common misreads
+    [/#(\d+)|NO\.?\s*(\d+)|№\s*(\d+)/gi, '#$1$2$3'], // Normalize card numbers
+    [/\b(\d{4})\s*PANINI/gi, '$1 Panini'], // Year + brand
+    [/\bRC\b/gi, 'RC'], // Rookie card
+    [/\bROOKIE\b/gi, 'Rookie'],
+    
+    // Player name corrections (common OCR mistakes)
+    [/JAYDEN\s*DANIELS?/gi, 'Jayden Daniels'],
+    [/JAYD[E3]N\s*DANI[E3]LS?/gi, 'Jayden Daniels'],
+    
+    // Set name normalizations
+    [/PANINI\s*PRIZM/gi, 'Panini Prizm'],
+    [/TOPPS\s*CHROME/gi, 'Topps Chrome'],
+    [/BOWMAN\s*CHROME/gi, 'Bowman Chrome'],
+    
+    // Grade normalizations
+    [/PSA\s*(\d+)/gi, 'PSA $1'],
+    [/BGS\s*(\d+(?:\.\d+)?)/gi, 'BGS $1'],
+    [/SGC\s*(\d+)/gi, 'SGC $1'],
+    
+    // Remove extra whitespace and clean up
+    [/\s+/g, ' '],
+    [/^\s+|\s+$/g, '']
+  ];
+  
+  // Apply all normalizations
+  cardTermNormalizations.forEach(([pattern, replacement]) => {
+    cleaned = cleaned.replace(pattern, replacement);
+  });
+  
+  return cleaned;
 }
 
 async function parseExtractedText(rawText: string): Promise<ExtractedCardInfo> {
@@ -136,18 +205,20 @@ async function parseExtractedText(rawText: string): Promise<ExtractedCardInfo> {
           role: 'system',
           content: `You are an expert trading card text parser. Extract structured information from OCR text of trading cards.
 
-Rules:
-- Look for player names, years (1950-2025), set names, card numbers, grades (PSA/BGS)
-- Handle common OCR errors (0/O, 1/I/l, 5/S, etc.)
-- Infer sport from context clues
-- If uncertain, mark confidence as lower
-- Return ONLY valid JSON
+CRITICAL PARSING RULES:
+- Player names: Handle common OCR errors (JAYD3N = JAYDEN, DANI3LS = DANIELS)
+- Years: Look for 4-digit years (1950-2025), prioritize recent years for modern cards
+- Sets: Normalize "Panini Prizm", "Topps Chrome", etc. Handle "PRIZM SILVER" = "Silver Prizm"
+- Card numbers: Extract from #347, No. 347, №347, or standalone numbers near player names
+- Grades: Look for PSA 10, BGS 9.5, SGC patterns
+- Variations: Silver Prizm, Gold Prizm, Chrome, Refractor, etc.
+- Sport inference: Use team names, card design cues, context
 
-Required JSON format:
+Return ONLY valid JSON:
 {
   "player": "Player Name",
   "year": "YYYY",
-  "set": "Set Name",
+  "set": "Normalized Set Name", 
   "cardNumber": "Card Number",
   "grade": "PSA 10" or "BGS 9.5" or null,
   "sport": "basketball|football|baseball|hockey|soccer|other",
@@ -157,7 +228,7 @@ Required JSON format:
         },
         {
           role: 'user',
-          content: `Parse this trading card OCR text:\n\n${rawText}`
+          content: `Parse this trading card OCR text and extract accurate card details:\n\n${rawText}`
         }
       ],
       temperature: 0.1,

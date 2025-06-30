@@ -1,4 +1,3 @@
-
 export interface EbayResult {
   title: string;
   price: number;
@@ -91,21 +90,26 @@ async function fetchEbayAPI(searchQuery: string, apiKey: string): Promise<{ resu
 async function scrapeEbaySoldListings(searchQuery: string): Promise<{ results: EbayResult[], error?: EbayError }> {
   console.log('Scraping eBay sold listings');
   
-  // Construct eBay sold listings search URL
+  // Construct eBay sold listings search URL with enhanced filters
   const encodedQuery = encodeURIComponent(searchQuery);
-  const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodedQuery}&_sacat=0&LH_Sold=1&LH_Complete=1&_sop=13&_ipg=50`;
+  const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodedQuery}&_sacat=0&LH_Sold=1&LH_Complete=1&_sop=13&_ipg=100&rt=nc&LH_ItemCondition=3000%7C3001%7C3002%7C3003%7C3004%7C3005`;
   
-  console.log('Scraping URL:', searchUrl);
+  console.log('Enhanced scraping URL:', searchUrl);
   
   try {
-    const response = await fetch(searchUrl, {
+    const response = await rateLimitedFetch(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache'
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Upgrade-Insecure-Requests': '1'
       }
     });
     
@@ -115,8 +119,8 @@ async function scrapeEbaySoldListings(searchQuery: string): Promise<{ results: E
     
     const html = await response.text();
     
-    // Parse HTML to extract sold listings
-    const results = parseEbayHTML(html, searchUrl);
+    // Parse HTML to extract sold listings with enhanced matching
+    const results = parseEbayHTMLEnhanced(html, searchUrl, searchQuery);
     
     if (results.length === 0) {
       return {
@@ -129,7 +133,7 @@ async function scrapeEbaySoldListings(searchQuery: string): Promise<{ results: E
     }
     
     console.log(`eBay scraping found ${results.length} real results`);
-    return { results: results.slice(0, 30) }; // Limit to top 30
+    return { results: results.slice(0, 50) }; // Limit to top 50
     
   } catch (error) {
     console.error('eBay scraping error:', error);
@@ -143,68 +147,227 @@ async function scrapeEbaySoldListings(searchQuery: string): Promise<{ results: E
   }
 }
 
-function parseEbayHTML(html: string, searchUrl: string): EbayResult[] {
+function parseEbayHTMLEnhanced(html: string, searchUrl: string, originalQuery: string): EbayResult[] {
   const results: EbayResult[] = [];
   
   try {
-    // Look for sold listing patterns in eBay HTML
-    // This is a simplified parser - in production you'd want more robust parsing
-    const itemRegex = /<div[^>]*class="[^"]*s-item[^"]*"[^>]*>[\s\S]*?<\/div>/g;
-    const titleRegex = /<h3[^>]*class="[^"]*s-item__title[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/;
-    const priceRegex = /<span[^>]*class="[^"]*s-item__price[^"]*"[^>]*>(?:<[^>]*>)*\$([0-9,]+\.?[0-9]*)/;
-    const dateRegex = /<span[^>]*class="[^"]*s-item__endedDate[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/;
-    const linkRegex = /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"/;
-    const imageRegex = /<img[^>]*src="([^"]*)"[^>]*class="[^"]*s-item__image[^"]*"/;
+    console.log('Parsing eBay HTML with enhanced matching logic');
     
-    let itemMatch;
-    while ((itemMatch = itemRegex.exec(html)) !== null && results.length < 50) {
-      const itemHtml = itemMatch[0];
-      
-      const titleMatch = titleRegex.exec(itemHtml);
-      const priceMatch = priceRegex.exec(itemHtml);
-      const dateMatch = dateRegex.exec(itemHtml);
-      const linkMatch = linkRegex.exec(itemHtml);
-      const imageMatch = imageRegex.exec(itemHtml);
-      
-      if (titleMatch && priceMatch) {
-        const price = parseFloat(priceMatch[1].replace(',', ''));
-        const dateStr = dateMatch ? dateMatch[1].trim() : '';
+    // Enhanced regex patterns for eBay's current structure
+    const itemPatterns = [
+      // Main item container patterns
+      /<div[^>]*class="[^"]*s-item[^"]*"[^>]*>[\s\S]*?<\/div>/g,
+      /<article[^>]*class="[^"]*srgl[^"]*"[^>]*>[\s\S]*?<\/article>/g,
+      /<div[^>]*data-view="[^"]*mi[^"]*"[^>]*>[\s\S]*?<\/div>/g
+    ];
+    
+    // Try each pattern to find items
+    for (const itemPattern of itemPatterns) {
+      let itemMatch;
+      while ((itemMatch = itemPattern.exec(html)) !== null && results.length < 100) {
+        const itemHtml = itemMatch[0];
+        const parsedItem = parseIndividualItem(itemHtml, searchUrl, originalQuery);
         
-        // Parse date - eBay uses formats like "Sold Jun 15, 2024"
-        let parsedDate = new Date().toISOString().split('T')[0];
-        if (dateStr && dateStr.includes('Sold')) {
-          try {
-            const dateOnly = dateStr.replace('Sold ', '').trim();
-            const parsed = new Date(dateOnly);
-            if (!isNaN(parsed.getTime())) {
-              parsedDate = parsed.toISOString().split('T')[0];
-            }
-          } catch (e) {
-            // Use current date if parsing fails
-          }
+        if (parsedItem) {
+          results.push(parsedItem);
         }
-        
-        results.push({
-          title: titleMatch[1].trim(),
-          price: price,
-          date: parsedDate,
-          url: linkMatch ? linkMatch[1] : searchUrl,
-          image: imageMatch ? imageMatch[1] : undefined,
-          source: 'eBay'
-        });
+      }
+      
+      // If we found items with this pattern, don't try others
+      if (results.length > 0) {
+        break;
       }
     }
     
+    // Sort by relevance score and date
+    const sortedResults = results
+      .filter(r => r.price > 0)
+      .sort((a, b) => {
+        const aScore = calculateItemRelevance(a.title, originalQuery);
+        const bScore = calculateItemRelevance(b.title, originalQuery);
+        
+        if (Math.abs(aScore - bScore) > 0.1) {
+          return bScore - aScore; // Higher score first
+        }
+        
+        // If relevance is similar, sort by date (newer first)
+        return new Date(b.date).getTime() - new Date(a.date).getTime();
+      });
+    
+    console.log(`Parsed and sorted ${sortedResults.length} items by relevance`);
+    return sortedResults;
+    
   } catch (error) {
     console.error('HTML parsing error:', error);
+    return [];
   }
-  
-  return results.filter(r => r.price > 0); // Only return items with valid prices
 }
 
-// Rate limiting
+function parseIndividualItem(itemHtml: string, searchUrl: string, originalQuery: string): EbayResult | null {
+  try {
+    // Enhanced regex patterns for different eBay layouts
+    const titlePatterns = [
+      /<h3[^>]*class="[^"]*s-item__title[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/,
+      /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/,
+      /<span[^>]*role="heading"[^>]*>([^<]+)/
+    ];
+    
+    const pricePatterns = [
+      /<span[^>]*class="[^"]*s-item__price[^"]*"[^>]*>(?:<[^>]*>)*\$([0-9,]+\.?[0-9]*)/,
+      /<span[^>]*class="[^"]*notranslate[^"]*"[^>]*>\$([0-9,]+\.?[0-9]*)/,
+      /<span[^>]*aria-label="[^"]*\$([0-9,]+\.?[0-9]*)[^"]*"/
+    ];
+    
+    const datePatterns = [
+      /<span[^>]*class="[^"]*s-item__endedDate[^"]*"[^>]*>(?:<[^>]*>)*Sold\s+([^<]+)/,
+      /<span[^>]*class="[^"]*s-item__subtitle[^"]*"[^>]*>(?:<[^>]*>)*Sold\s+([^<]+)/
+    ];
+    
+    const linkPatterns = [
+      /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"/,
+      /<a[^>]*href="([^"]*ebay\.com[^"]*)"[^>]*class="[^"]*s-item/
+    ];
+    
+    const imagePatterns = [
+      /<img[^>]*src="([^"]*)"[^>]*class="[^"]*s-item__image[^"]*"/,
+      /<img[^>]*class="[^"]*s-item__image[^"]*"[^>]*src="([^"]*)"/
+    ];
+    
+    // Extract data using patterns
+    let title = '', price = 0, dateStr = '', url = '', imageUrl = '';
+    
+    // Try title patterns
+    for (const pattern of titlePatterns) {
+      const match = pattern.exec(itemHtml);
+      if (match) {
+        title = match[1].trim();
+        break;
+      }
+    }
+    
+    // Try price patterns  
+    for (const pattern of pricePatterns) {
+      const match = pattern.exec(itemHtml);
+      if (match) {
+        price = parseFloat(match[1].replace(',', ''));
+        break;
+      }
+    }
+    
+    // Try date patterns
+    for (const pattern of datePatterns) {
+      const match = pattern.exec(itemHtml);
+      if (match) {
+        dateStr = match[1].trim();
+        break;
+      }
+    }
+    
+    // Try link patterns
+    for (const pattern of linkPatterns) {
+      const match = pattern.exec(itemHtml);
+      if (match) {
+        url = match[1];
+        break;
+      }
+    }
+    
+    // Try image patterns
+    for (const pattern of imagePatterns) {
+      const match = pattern.exec(itemHtml);
+      if (match) {
+        imageUrl = match[1];
+        break;
+      }
+    }
+    
+    // Validate we have minimum required data
+    if (!title || price <= 0) {
+      return null;
+    }
+    
+    // Parse and validate date
+    let parsedDate = new Date().toISOString().split('T')[0];
+    if (dateStr) {
+      try {
+        // Handle various eBay date formats
+        const cleanDate = dateStr
+          .replace(/^(Sold\s+)/, '')
+          .replace(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/, (match, month, day, year) => {
+            const fullYear = year.length === 2 ? `20${year}` : year;
+            return `${month}/${day}/${fullYear}`;
+          });
+        
+        const parsed = new Date(cleanDate);
+        if (!isNaN(parsed.getTime()) && parsed.getFullYear() > 2000) {
+          parsedDate = parsed.toISOString().split('T')[0];
+        }
+      } catch (e) {
+        // Use current date if parsing fails
+        console.log('Date parsing failed for:', dateStr);
+      }
+    }
+    
+    // Calculate relevance score for this item
+    const relevanceScore = calculateItemRelevance(title, originalQuery);
+    
+    return {
+      title: title,
+      price: price,
+      date: parsedDate,
+      url: url || searchUrl,
+      image: imageUrl || undefined,
+      source: 'eBay'
+    };
+    
+  } catch (error) {
+    console.error('Error parsing individual item:', error);
+    return null;
+  }
+}
+
+function calculateItemRelevance(title: string, originalQuery: string): number {
+  const titleLower = title.toLowerCase();
+  const queryLower = originalQuery.toLowerCase();
+  
+  let score = 0;
+  
+  // Extract key terms from query
+  const queryTerms = queryLower
+    .split(/\s+/)
+    .filter(term => term.length > 2)
+    .filter(term => !['the', 'and', 'for', 'card', 'trading'].includes(term));
+  
+  // Check for exact query substring match
+  if (titleLower.includes(queryLower)) {
+    score += 1.0;
+  }
+  
+  // Check individual term matches
+  const matchedTerms = queryTerms.filter(term => titleLower.includes(term));
+  const termMatchRatio = matchedTerms.length / queryTerms.length;
+  score += termMatchRatio * 0.8;
+  
+  // Bonus for specific card indicators
+  const cardIndicators = ['#', 'rc', 'rookie', 'prizm', 'chrome', 'refractor', 'parallel'];
+  const indicatorMatches = cardIndicators.filter(indicator => titleLower.includes(indicator));
+  score += indicatorMatches.length * 0.1;
+  
+  // Bonus for recent cards (2020+)
+  const yearMatch = title.match(/20(2[0-9])/);
+  if (yearMatch) {
+    const year = parseInt(yearMatch[0]);
+    if (year >= 2020) {
+      score += 0.2;
+    }
+  }
+  
+  return Math.min(score, 2.0); // Cap at 2.0
+}
+
+// Rate limiting with better timing
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 2000; // 2 seconds between requests
+const MIN_REQUEST_INTERVAL = 3000; // 3 seconds between requests
 
 async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
   const now = Date.now();
