@@ -1,3 +1,4 @@
+
 export interface EbayResult {
   title: string;
   price: number;
@@ -13,85 +14,65 @@ export interface EbayError {
   details?: any;
 }
 
-// Enhanced debugging utilities
-class ScrapingDebugger {
-  static logResponse(source: string, response: Response, html?: string) {
-    console.log(`=== ${source} RESPONSE DEBUG ===`);
-    console.log(`Status: ${response.status} ${response.statusText}`);
-    console.log(`Headers:`, Object.fromEntries(response.headers.entries()));
-    console.log(`Content-Type: ${response.headers.get('content-type')}`);
-    if (html) {
-      console.log(`HTML Length: ${html.length}`);
-      console.log(`HTML Preview: ${html.substring(0, 500)}...`);
-      
-      // Check for common blocking indicators
-      if (html.includes('captcha') || html.includes('robot')) {
-        console.warn('⚠️ Possible bot detection/captcha');
-      }
-      if (html.includes('blocked') || html.includes('access denied')) {
-        console.warn('⚠️ Access blocked');
-      }
-    }
-    console.log('========================');
-  }
-}
-
 // Global timeout constants
-const REQUEST_TIMEOUT = 10000; // 10 seconds per request
-const MIN_REQUEST_INTERVAL = 1500; // 1.5 seconds between requests
+const REQUEST_TIMEOUT = 12000; // Increased timeout
+const MIN_REQUEST_INTERVAL = 1000; // Reduced interval
 
-// URL validation utility
-function isValidEbayItemUrl(url: string): boolean {
+// More flexible URL validation
+function isValidEbayUrl(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
   
-  // Must be an eBay item URL
-  const ebayItemPattern = /^https?:\/\/(?:www\.)?ebay\.com\/itm\/[\w\-\/]+/i;
-  return ebayItemPattern.test(url);
+  // Accept any eBay URL that looks reasonable
+  const ebayPatterns = [
+    /ebay\.com\/itm\//i,
+    /ebay\.com\/.*\/\d+/i,
+    /ebay\..*\/.*\d+/i
+  ];
+  
+  return ebayPatterns.some(pattern => pattern.test(url));
 }
 
-// Enhanced URL extraction utility
-function extractEbayItemUrl(html: string): string | null {
-  // Multiple URL extraction patterns in order of preference
-  const urlPatterns = [
-    // Primary s-item link pattern
-    /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"/i,
-    // Alternative s-item link pattern
-    /<a[^>]*href="([^"]+)"[^>]*class="[^"]*s-item__link[^"]*"/i,
-    // Direct item link with itm
-    /<a[^>]*href="(https?:\/\/(?:www\.)?ebay\.com\/itm\/[^"]+)"/i,
-    // Anchor with item ID pattern
-    /<a[^>]*href="([^"]*\/itm\/[^"]*)"[^>]*>/i,
-    // Generic ebay.com/itm link
-    /href="(https?:\/\/[^"]*ebay\.com[^"]*\/itm\/[^"]+)"/i,
-    // Any ebay item URL in the HTML block
-    /(https?:\/\/(?:www\.)?ebay\.com\/itm\/[\w\-\/?&=%.]+)/i
+// Simplified URL extraction with multiple fallbacks
+function extractEbayUrls(html: string): string[] {
+  const urls = new Set<string>();
+  
+  // Multiple URL extraction patterns
+  const patterns = [
+    // Standard item links
+    /href="([^"]*ebay\.com[^"]*itm[^"]*)/gi,
+    // Any eBay link with numbers (likely item IDs)
+    /href="([^"]*ebay\.com[^"]*\d{10,}[^"]*)/gi,
+    // Generic eBay URLs
+    /(https?:\/\/[^"\s]*ebay\.com[^"\s]*)/gi,
+    // Relative URLs that might be eBay items
+    /href="(\/itm\/[^"]+)"/gi
   ];
-
-  for (const pattern of urlPatterns) {
-    const match = html.match(pattern);
-    if (match && match[1]) {
+  
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
       let url = match[1];
       
-      // Clean up the URL
-      url = url.replace(/&amp;/g, '&');
-      url = url.split('?')[0]; // Remove query parameters to get clean item URL
+      // Clean and normalize URL
+      if (url.startsWith('/')) {
+        url = 'https://www.ebay.com' + url;
+      }
+      url = url.replace(/&amp;/g, '&').split('?')[0];
       
-      // Validate the extracted URL
-      if (isValidEbayItemUrl(url)) {
-        return url;
+      if (isValidEbayUrl(url)) {
+        urls.add(url);
       }
     }
   }
   
-  return null;
+  return Array.from(urls).slice(0, 20); // Limit results
 }
 
 export async function fetchEbayComps(searchQuery: string): Promise<{ results: EbayResult[], error?: EbayError }> {
-  console.log('=== IMPROVED EBAY SCRAPING ===');
+  console.log('=== REVISED EBAY SCRAPING ===');
   console.log('Search query:', searchQuery);
   
   try {
-    // Build a single, focused search URL
     const searchUrl = buildEbayUrl(searchQuery);
     console.log('eBay URL:', searchUrl);
     
@@ -100,10 +81,7 @@ export async function fetchEbayComps(searchQuery: string): Promise<{ results: Eb
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none'
+        'Cache-Control': 'no-cache'
       }
     });
     
@@ -112,28 +90,28 @@ export async function fetchEbayComps(searchQuery: string): Promise<{ results: Eb
     }
     
     const html = await response.text();
-    ScrapingDebugger.logResponse('eBay', response, html);
+    console.log(`eBay HTML length: ${html.length}`);
     
-    // Try multiple parsing strategies
-    const results = await parseEbayHtmlImproved(html, searchUrl, searchQuery);
+    // Extract all potential URLs first
+    const itemUrls = extractEbayUrls(html);
+    console.log(`Found ${itemUrls.length} potential eBay URLs`);
     
-    if (results.length === 0) {
+    if (itemUrls.length === 0) {
+      console.log('No eBay URLs found in HTML');
       return {
         results: [],
         error: {
           source: 'eBay',
-          message: 'No results found with valid item URLs',
-          details: {
-            htmlLength: html.length,
-            hasItems: html.includes('s-item'),
-            hasPrice: html.includes('$'),
-            queryInHtml: html.toLowerCase().includes(searchQuery.toLowerCase())
-          }
+          message: 'No eBay item URLs found in search results',
+          details: { htmlLength: html.length, searchUrl }
         }
       };
     }
     
-    console.log(`eBay scraping found ${results.length} valid results with permalinks`);
+    // Parse results using flexible approach
+    const results = await parseEbayFlexible(html, itemUrls, searchQuery);
+    
+    console.log(`eBay scraping completed: ${results.length} results`);
     return { results: results.slice(0, 25) };
     
   } catch (error) {
@@ -154,214 +132,136 @@ function buildEbayUrl(searchQuery: string): string {
     '_nkw': searchQuery,
     'LH_Sold': '1',
     'LH_Complete': '1',
-    '_sop': '13', // Sort by newest
-    '_ipg': '60',
-    'rt': 'nc'
+    '_sop': '13',
+    '_ipg': '60'
   });
   
   return `https://www.ebay.com/sch/i.html?${params.toString()}`;
 }
 
-async function parseEbayHtmlImproved(html: string, searchUrl: string, originalQuery: string): Promise<EbayResult[]> {
+async function parseEbayFlexible(html: string, itemUrls: string[], originalQuery: string): Promise<EbayResult[]> {
   const results: EbayResult[] = [];
   
-  // Strategy 1: Modern s-item structure
-  const modernResults = parseEbayModern(html, searchUrl);
-  results.push(...modernResults);
-  
-  // Strategy 2: Fallback regex patterns
-  if (results.length < 3) {
-    const fallbackResults = parseEbayFallback(html, searchUrl);
-    results.push(...fallbackResults);
-  }
-  
-  // Strategy 3: Simple price/title extraction
-  if (results.length < 3) {
-    const simpleResults = parseEbaySimple(html, searchUrl);
-    results.push(...simpleResults);
-  }
-  
-  console.log(`eBay parsing found ${results.length} total results with valid URLs`);
-  
-  // Enhanced validation - ensure all results have valid URLs
-  return results.filter(r => 
-    r.title && 
-    r.title.length > 5 && 
-    r.price > 0 && 
-    r.price < 50000 && 
-    isValidEbayItemUrl(r.url) // Critical: only return results with valid item URLs
-  );
-}
-
-function parseEbayModern(html: string, searchUrl: string): EbayResult[] {
-  const results: EbayResult[] = [];
-  
-  // Look for s-item containers
-  const itemRegex = /<div[^>]*class="[^"]*s-item[^"]*"[^>]*>[\s\S]*?(?=<div[^>]*class="[^"]*s-item[^"]*"|<\/div>\s*<\/div>\s*$)/g;
-  
-  let match;
-  while ((match = itemRegex.exec(html)) !== null && results.length < 50) {
-    const itemHtml = match[0];
+  // Strategy 1: Try to find price/title pairs near URLs
+  for (const url of itemUrls.slice(0, 10)) {
+    const urlPos = html.indexOf(url);
+    if (urlPos === -1) continue;
     
-    try {
-      // Extract URL first - if no valid URL, skip this item entirely
-      const itemUrl = extractEbayItemUrl(itemHtml);
-      if (!itemUrl) {
-        console.log('Skipping item - no valid URL found');
-        continue;
-      }
-      
-      // Extract title - try multiple patterns
-      const titlePatterns = [
-        /<h3[^>]*class="[^"]*s-item__title[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/,
-        /<span[^>]*role="heading"[^>]*>([^<]+)/,
-        /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*title="([^"]+)"/
-      ];
-      
-      let title = '';
-      for (const pattern of titlePatterns) {
-        const titleMatch = itemHtml.match(pattern);
-        if (titleMatch && titleMatch[1] && titleMatch[1].trim().length > 5) {
-          title = titleMatch[1].trim();
+    // Look in a large window around the URL
+    const start = Math.max(0, urlPos - 1000);
+    const end = Math.min(html.length, urlPos + 1000);
+    const context = html.substring(start, end);
+    
+    // Find price in context (very flexible)
+    const pricePatterns = [
+      /\$([0-9,]+\.?\d*)/g,
+      /USD\s*([0-9,]+\.?\d*)/g,
+      /price[^>]*>.*?\$([0-9,]+\.?\d*)/gi
+    ];
+    
+    let price = 0;
+    for (const pattern of pricePatterns) {
+      const matches = [...context.matchAll(pattern)];
+      for (const match of matches) {
+        const p = parseFloat(match[1].replace(/,/g, ''));
+        if (p > 1 && p < 10000) {
+          price = p;
           break;
         }
       }
-      
-      if (!title) {
-        console.log('Skipping item - no valid title found');
-        continue;
-      }
-      
-      // Extract price
-      const priceMatch = itemHtml.match(/<span[^>]*class="[^"]*s-item__price[^"]*"[^>]*>(?:<[^>]*>)*\$([0-9,]+\.?[0-9]*)/);
-      if (!priceMatch) {
-        console.log('Skipping item - no valid price found');
-        continue;
-      }
-      
-      const price = parseFloat(priceMatch[1].replace(/,/g, ''));
-      if (price <= 0) {
-        console.log('Skipping item - invalid price value');
-        continue;
-      }
-      
-      // Extract date
-      const dateMatch = itemHtml.match(/Sold\s+([^<]+)/);
-      let date = new Date().toISOString().split('T')[0];
-      if (dateMatch) {
-        try {
-          const parsedDate = new Date(dateMatch[1]);
-          if (!isNaN(parsedDate.getTime())) {
-            date = parsedDate.toISOString().split('T')[0];
-          }
-        } catch (e) {
-          // Keep default date
+      if (price > 0) break;
+    }
+    
+    // Find title in context (very flexible)
+    const titlePatterns = [
+      />([^<]{15,200})</g,
+      /title="([^"]{15,200})"/gi,
+      /alt="([^"]{15,200})"/gi
+    ];
+    
+    let title = '';
+    for (const pattern of titlePatterns) {
+      const matches = [...context.matchAll(pattern)];
+      for (const match of matches) {
+        const t = match[1].trim();
+        // Accept any title that seems card-related or has reasonable length
+        if (t.length >= 15 && (
+          t.toLowerCase().includes('card') ||
+          t.toLowerCase().includes('rookie') ||
+          t.toLowerCase().includes('rc') ||
+          t.toLowerCase().includes(originalQuery.toLowerCase().split(' ')[0]) ||
+          t.length >= 20
+        )) {
+          title = t;
+          break;
         }
       }
-      
-      // Extract image
-      const imageMatch = itemHtml.match(/<img[^>]*src="([^"]+)"[^>]*class="[^"]*s-item__image/);
-      
+      if (title) break;
+    }
+    
+    if (price > 0 && title) {
       results.push({
-        title,
+        title: title.substring(0, 150), // Limit title length
         price,
-        date,
-        url: itemUrl, // Always use the extracted valid URL
-        image: imageMatch ? imageMatch[1] : undefined,
+        date: new Date().toISOString().split('T')[0],
+        url,
         source: 'eBay'
       });
       
-    } catch (error) {
-      console.error('Error parsing eBay item:', error);
-      continue;
+      console.log(`✅ eBay result: "${title}" - $${price}`);
     }
   }
   
-  console.log(`Modern eBay parsing: ${results.length} items with valid URLs`);
+  // Strategy 2: If we have few results, try broader pattern matching
+  if (results.length < 3) {
+    const broadResults = parseBroadPatterns(html, originalQuery);
+    results.push(...broadResults);
+  }
+  
   return results;
 }
 
-function parseEbayFallback(html: string, searchUrl: string): EbayResult[] {
+function parseBroadPatterns(html: string, query: string): EbayResult[] {
   const results: EbayResult[] = [];
   
-  // Enhanced fallback approach - look for item blocks with URLs
-  const itemBlockRegex = /<div[^>]*class="[^"]*s-item[^"]*"[^>]*>[\s\S]{1,2000}?<\/div>/g;
+  // Look for any price/title combinations
+  const sections = html.split(/<div[^>]*class="[^"]*s-item/i);
   
-  let match;
-  while ((match = itemBlockRegex.exec(html)) !== null && results.length < 20) {
-    const itemBlock = match[0];
+  for (const section of sections.slice(1, 15)) { // Process up to 15 sections
+    const priceMatch = section.match(/\$([0-9,]+\.?\d*)/);
+    const titleMatches = [
+      ...section.matchAll(/>([^<]{20,150})</g)
+    ];
     
-    // Extract URL first
-    const itemUrl = extractEbayItemUrl(itemBlock);
-    if (!itemUrl) continue;
-    
-    // Look for title and price within this block
-    const titleMatch = itemBlock.match(/>([^<]*(?:Prizm|Rookie|RC|Daniels|PSA|BGS|Card)[^<]*)</i);
-    const priceMatch = itemBlock.match(/\$([0-9,]+\.?[0-9]*)/);
-    
-    if (titleMatch && priceMatch) {
-      const title = titleMatch[1].trim();
+    if (priceMatch) {
       const price = parseFloat(priceMatch[1].replace(/,/g, ''));
       
-      if (title.length > 10 && price > 0 && price < 10000) {
-        results.push({
-          title,
-          price,
-          date: new Date().toISOString().split('T')[0],
-          url: itemUrl,
-          source: 'eBay'
-        });
-      }
-    }
-  }
-  
-  console.log(`Fallback eBay parsing: ${results.length} items with valid URLs`);
-  return results;
-}
-
-function parseEbaySimple(html: string, searchUrl: string): EbayResult[] {
-  const results: EbayResult[] = [];
-  
-  // Find all eBay item URLs in the HTML
-  const itemUrlPattern = /https?:\/\/(?:www\.)?ebay\.com\/itm\/[\w\-\/?&=%.]+/g;
-  const itemUrls = [...new Set(html.match(itemUrlPattern) || [])];
-  
-  console.log(`Found ${itemUrls.length} potential item URLs in HTML`);
-  
-  // For each URL, try to find associated price and title nearby
-  itemUrls.slice(0, 10).forEach((url, index) => {
-    const urlIndex = html.indexOf(url);
-    if (urlIndex > 0) {
-      // Look for context around this URL (before and after)
-      const contextStart = Math.max(0, urlIndex - 800);
-      const contextEnd = Math.min(html.length, urlIndex + 800);
-      const context = html.substring(contextStart, contextEnd);
-      
-      const priceMatch = context.match(/\$([0-9,]+\.?[0-9]*)/);
-      const titleMatch = context.match(/>([^<]*(?:Card|Rookie|Prizm|Daniels)[^<]*)</i);
-      
-      if (priceMatch && titleMatch) {
-        const price = parseFloat(priceMatch[1].replace(/[$,]/g, ''));
-        const title = titleMatch[1].trim();
-        
-        if (price > 5 && price < 5000 && title.length > 5) {
-          results.push({
-            title,
-            price,
-            date: new Date().toISOString().split('T')[0],
-            url: url.split('?')[0], // Clean URL
-            source: 'eBay'
-          });
+      if (price > 1 && price < 5000) {
+        // Find the best title candidate
+        for (const titleMatch of titleMatches) {
+          const title = titleMatch[1].trim();
+          
+          if (title.length >= 20 && !title.includes('<') && !title.includes('>')) {
+            results.push({
+              title: title.substring(0, 150),
+              price,
+              date: new Date().toISOString().split('T')[0],
+              url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}`,
+              source: 'eBay'
+            });
+            
+            console.log(`✅ eBay broad result: "${title}" - $${price}`);
+            break;
+          }
         }
       }
     }
-  });
+  }
   
-  console.log(`Simple eBay parsing: ${results.length} items with valid URLs`);
-  return results;
+  return results.slice(0, 10);
 }
 
-// Enhanced rate limiting with timeout
+// Rate limiting with timeout
 let lastRequestTime = 0;
 
 async function rateLimitedFetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
@@ -370,13 +270,11 @@ async function rateLimitedFetchWithTimeout(url: string, options: RequestInit): P
   
   if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
     const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
-    console.log(`eBay rate limiting: waiting ${waitTime}ms`);
     await new Promise(resolve => setTimeout(resolve, waitTime));
   }
   
   lastRequestTime = Date.now();
   
-  // Wrap fetch with timeout using Promise.race
   return Promise.race([
     fetch(url, options),
     new Promise<Response>((_, reject) => 

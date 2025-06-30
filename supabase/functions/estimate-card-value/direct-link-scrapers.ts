@@ -1,4 +1,3 @@
-
 import { Logger } from './logger.ts';
 import { withTimeout } from './utils.ts';
 import { config } from './config.ts';
@@ -22,7 +21,7 @@ export async function scrapeDirectLinks(
   urls: string[],
   logger: Logger
 ): Promise<DirectLinkScrapingResult> {
-  logger.info('Starting direct link scraping', {
+  logger.info('Starting revised direct link scraping', {
     operation: 'scrapeDirectLinks',
     urlCount: urls.length
   });
@@ -30,22 +29,26 @@ export async function scrapeDirectLinks(
   const results: DirectLinkResult[] = [];
   const errors: Array<{ source: string; message: string; url: string }> = [];
 
-  for (const url of urls) {
+  for (const url of urls.slice(0, 6)) { // Limit to prevent timeouts
     try {
       logger.info(`Scraping direct link: ${url}`);
       
       let result: DirectLinkResult | null = null;
       
       if (url.includes('ebay.com')) {
-        result = await scrapeEbayDirectLink(url, logger);
+        result = await scrapeEbayDirectLinkRevised(url, logger);
       } else if (url.includes('130point.com')) {
-        result = await scrape130PointDirectLink(url, logger);
+        result = await scrape130PointDirectLinkRevised(url, logger);
       } else if (url.includes('pwcc.market')) {
-        result = await scrapePwccDirectLink(url, logger);
+        result = await scrapePwccDirectLinkRevised(url, logger);
+      } else {
+        // Try generic scraping for unknown sources
+        result = await scrapeGenericDirectLink(url, logger);
       }
       
       if (result) {
         results.push(result);
+        logger.info(`✅ Successfully scraped: ${result.title} - $${result.price}`);
       } else {
         errors.push({
           source: 'Direct Link Scraper',
@@ -54,8 +57,8 @@ export async function scrapeDirectLinks(
         });
       }
       
-      // Rate limiting between requests
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
       
     } catch (error) {
       logger.error('Direct link scraping failed', error, { url });
@@ -79,20 +82,18 @@ export async function scrapeDirectLinks(
   };
 }
 
-async function scrapeEbayDirectLink(url: string, logger: Logger): Promise<DirectLinkResult | null> {
+async function scrapeEbayDirectLinkRevised(url: string, logger: Logger): Promise<DirectLinkResult | null> {
   try {
     const response = await withTimeout(
       fetch(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'gzip, deflate',
-          'Connection': 'keep-alive',
           'Cache-Control': 'no-cache'
         }
       }),
-      config.timeout.request,
+      10000,
       'eBay direct link'
     );
 
@@ -102,43 +103,100 @@ async function scrapeEbayDirectLink(url: string, logger: Logger): Promise<Direct
 
     const html = await response.text();
     
-    // Extract data using targeted selectors
-    const titleMatch = html.match(/<h1[^>]*id[^>]*="x-title-label-lbl"[^>]*>([^<]+)<\/h1>/i) ||
-                      html.match(/<title>([^|]+)\|/i);
+    // Multiple title extraction strategies
+    let title = '';
+    const titlePatterns = [
+      /<h1[^>]*id[^>]*="x-title-label-lbl"[^>]*>([^<]+)<\/h1>/i,
+      /<h1[^>]*class="[^"]*notranslate[^"]*"[^>]*>([^<]+)<\/h1>/i,
+      /<title>([^|]+)\s*\|/i,
+      /<h1[^>]*>([^<]{20,200})</i,
+      /property="og:title"[^>]*content="([^"]+)"/i
+    ];
     
-    const priceMatch = html.match(/"PRICE_VALUE":\s*"([^"]+)"/i) ||
-                      html.match(/span[^>]*class[^>]*"currentPrice"[^>]*>([^<]+)</i);
-    
-    const dateMatch = html.match(/"SOLD_DATE":\s*"([^"]+)"/i) ||
-                     html.match(/Sold\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i);
-    
-    const imageMatch = html.match(/"originalImg":\s*"([^"]+)"/i) ||
-                      html.match(/img[^>]*id[^>]*="icImg"[^>]*src[^>]*="([^"]+)"/i);
-
-    if (!titleMatch || !priceMatch) {
-      logger.warn('Could not extract required data from eBay page', { url });
-      return null;
+    for (const pattern of titlePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1] && match[1].trim().length > 10) {
+        title = match[1].trim();
+        break;
+      }
     }
 
-    const title = titleMatch[1].trim();
-    const priceStr = priceMatch[1].replace(/[,$]/g, '');
-    const price = parseFloat(priceStr);
+    // Multiple price extraction strategies
+    let price = 0;
+    const pricePatterns = [
+      /"PRICE_VALUE":\s*"([^"]+)"/i,
+      /"currentPrice"[^}]*"value":\s*"([^"]+)"/i,
+      /span[^>]*class[^>]*"currentPrice"[^>]*>.*?\$([0-9,]+\.?\d*)/i,
+      /class="notranslate"[^>]*>.*?\$([0-9,]+\.?\d*)/i,
+      /"price":\s*"?([0-9,]+\.?\d*)"?/i,
+      /\$([0-9,]+\.?\d*)/g // Fallback: any price-like pattern
+    ];
     
-    if (isNaN(price) || price <= 0) {
-      logger.warn('Invalid price extracted from eBay page', { url, priceStr });
-      return null;
-    }
-
-    // Parse date
-    let date = new Date().toISOString().split('T')[0]; // Default to today
-    if (dateMatch) {
-      try {
-        const parsedDate = new Date(dateMatch[1]);
-        if (!isNaN(parsedDate.getTime())) {
-          date = parsedDate.toISOString().split('T')[0];
+    for (const pattern of pricePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        const priceStr = match[1].replace(/[,$]/g, '');
+        const parsedPrice = parseFloat(priceStr);
+        if (!isNaN(parsedPrice) && parsedPrice > 0 && parsedPrice < 50000) {
+          price = parsedPrice;
+          break;
         }
-      } catch (error) {
-        logger.warn('Failed to parse eBay date', { dateStr: dateMatch[1] });
+      }
+    }
+
+    // If no price found with specific patterns, try all prices and pick reasonable one
+    if (price === 0) {
+      const allPriceMatches = [...html.matchAll(/\$([0-9,]+\.?\d*)/g)];
+      for (const match of allPriceMatches) {
+        const p = parseFloat(match[1].replace(/,/g, ''));
+        if (p > 1 && p < 10000) {
+          price = p;
+          break;
+        }
+      }
+    }
+
+    if (!title || price <= 0) {
+      logger.warn('Could not extract required data from eBay page', { url, title, price });
+      return null;
+    }
+
+    // Date extraction
+    let date = new Date().toISOString().split('T')[0];
+    const datePatterns = [
+      /"SOLD_DATE":\s*"([^"]+)"/i,
+      /Sold\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i,
+      /sold[^>]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i
+    ];
+    
+    for (const pattern of datePatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        try {
+          const parsedDate = new Date(match[1]);
+          if (!isNaN(parsedDate.getTime())) {
+            date = parsedDate.toISOString().split('T')[0];
+            break;
+          }
+        } catch (error) {
+          // Continue to next pattern
+        }
+      }
+    }
+
+    // Image extraction
+    const imagePatterns = [
+      /"originalImg":\s*"([^"]+)"/i,
+      /img[^>]*id[^>]*="icImg"[^>]*src[^>]*="([^"]+)"/i,
+      /property="og:image"[^>]*content="([^"]+)"/i
+    ];
+    
+    let image;
+    for (const pattern of imagePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        image = match[1];
+        break;
       }
     }
 
@@ -147,7 +205,7 @@ async function scrapeEbayDirectLink(url: string, logger: Logger): Promise<Direct
       price,
       date,
       source: 'eBay',
-      image: imageMatch?.[1],
+      image,
       url,
       condition: extractConditionFromTitle(title)
     };
@@ -158,17 +216,17 @@ async function scrapeEbayDirectLink(url: string, logger: Logger): Promise<Direct
   }
 }
 
-async function scrape130PointDirectLink(url: string, logger: Logger): Promise<DirectLinkResult | null> {
+async function scrape130PointDirectLinkRevised(url: string, logger: Logger): Promise<DirectLinkResult | null> {
   try {
     const response = await withTimeout(
       fetch(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9'
         }
       }),
-      config.timeout.request,
+      8000,
       '130Point direct link'
     );
 
@@ -178,41 +236,60 @@ async function scrape130PointDirectLink(url: string, logger: Logger): Promise<Di
 
     const html = await response.text();
     
-    // Extract data using 130Point specific patterns
-    const titleMatch = html.match(/<h1[^>]*class[^>]*="card-title"[^>]*>([^<]+)<\/h1>/i) ||
-                      html.match(/<title>([^-]+)-/i);
+    // Flexible title extraction
+    let title = '';
+    const titlePatterns = [
+      /<h1[^>]*class[^>]*="card-title"[^>]*>([^<]+)<\/h1>/i,
+      /<h1[^>]*>([^<]{15,200})</i,
+      /<title>([^-|]+)[-|]/i,
+      /property="og:title"[^>]*content="([^"]+)"/i,
+      />([^<]*(?:card|rookie|prizm)[^<]*)</gi
+    ];
     
-    const priceMatch = html.match(/\$([0-9,]+\.?\d*)/i);
-    
-    const dateMatch = html.match(/sold[^>]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i) ||
-                     html.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
-    
-    const imageMatch = html.match(/img[^>]*src[^>]*="([^"]*card[^"]*\.(?:jpg|jpeg|png|gif))"/i);
+    for (const pattern of titlePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1] && match[1].trim().length >= 15) {
+        title = match[1].trim();
+        break;
+      }
+    }
 
-    if (!titleMatch || !priceMatch) {
-      logger.warn('Could not extract required data from 130Point page', { url });
+    // Flexible price extraction
+    let price = 0;
+    const pricePatterns = [
+      /\$([0-9,]+\.?\d*)/g,
+      /price[^>]*>.*?\$([0-9,]+\.?\d*)/gi,
+      /sold[^>]*\$([0-9,]+\.?\d*)/gi
+    ];
+    
+    for (const pattern of pricePatterns) {
+      const matches = [...html.matchAll(pattern)];
+      for (const match of matches) {
+        const p = parseFloat(match[1].replace(/[$,]/g, ''));
+        if (p > 1 && p < 10000) {
+          price = p;
+          break;
+        }
+      }
+      if (price > 0) break;
+    }
+
+    if (!title || price <= 0) {
+      logger.warn('Could not extract required data from 130Point page', { url, title, price });
       return null;
     }
 
-    const title = titleMatch[1].trim();
-    const priceStr = priceMatch[1].replace(/[,$]/g, '');
-    const price = parseFloat(priceStr);
-    
-    if (isNaN(price) || price <= 0) {
-      logger.warn('Invalid price extracted from 130Point page', { url, priceStr });
-      return null;
-    }
-
-    // Parse date
+    // Date extraction
     let date = new Date().toISOString().split('T')[0];
+    const dateMatch = html.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})|(\d{4}-\d{2}-\d{2})/);
     if (dateMatch) {
       try {
-        const parsedDate = new Date(dateMatch[1]);
+        const parsedDate = new Date(dateMatch[0]);
         if (!isNaN(parsedDate.getTime())) {
           date = parsedDate.toISOString().split('T')[0];
         }
       } catch (error) {
-        logger.warn('Failed to parse 130Point date', { dateStr: dateMatch[1] });
+        // Keep default date
       }
     }
 
@@ -221,7 +298,6 @@ async function scrape130PointDirectLink(url: string, logger: Logger): Promise<Di
       price,
       date,
       source: '130Point',
-      image: imageMatch?.[1],
       url,
       condition: extractConditionFromTitle(title)
     };
@@ -232,7 +308,7 @@ async function scrape130PointDirectLink(url: string, logger: Logger): Promise<Di
   }
 }
 
-async function scrapePwccDirectLink(url: string, logger: Logger): Promise<DirectLinkResult | null> {
+async function scrapePwccDirectLinkRevised(url: string, logger: Logger): Promise<DirectLinkResult | null> {
   try {
     const response = await withTimeout(
       fetch(url, {
@@ -241,7 +317,7 @@ async function scrapePwccDirectLink(url: string, logger: Logger): Promise<Direct
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
       }),
-      config.timeout.request,
+      8000,
       'PWCC direct link'
     );
 
@@ -251,32 +327,47 @@ async function scrapePwccDirectLink(url: string, logger: Logger): Promise<Direct
 
     const html = await response.text();
     
-    // Extract data using PWCC specific patterns
-    const titleMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/i) ||
-                      html.match(/<title>([^|]+)\|/i);
+    // Extract title
+    const titlePatterns = [
+      /<h1[^>]*>([^<]+)<\/h1>/i,
+      /<title>([^|]+)\|/i,
+      /property="og:title"[^>]*content="([^"]+)"/i
+    ];
     
-    const priceMatch = html.match(/Final Price[^$]*\$([0-9,]+\.?\d*)/i) ||
-                      html.match(/\$([0-9,]+\.?\d*)/i);
-    
-    const dateMatch = html.match(/Ended[^>]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
-    
-    const imageMatch = html.match(/img[^>]*src[^>]*="([^"]*\.(?:jpg|jpeg|png|gif))"/i);
-
-    if (!titleMatch || !priceMatch) {
-      logger.warn('Could not extract required data from PWCC page', { url });
-      return null;
+    let title = '';
+    for (const pattern of titlePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1] && match[1].trim().length > 10) {
+        title = match[1].trim();
+        break;
+      }
     }
 
-    const title = titleMatch[1].trim();
-    const priceStr = priceMatch[1].replace(/[,$]/g, '');
-    const price = parseFloat(priceStr);
+    // Extract price
+    const pricePatterns = [
+      /Final Price[^$]*\$([0-9,]+\.?\d*)/i,
+      /\$([0-9,]+\.?\d*)/g
+    ];
     
-    if (isNaN(price) || price <= 0) {
-      logger.warn('Invalid price extracted from PWCC page', { url, priceStr });
+    let price = 0;
+    for (const pattern of pricePatterns) {
+      const matches = [...html.matchAll(pattern)];
+      for (const match of matches) {
+        const p = parseFloat(match[1].replace(/[$,]/g, ''));
+        if (p > 10 && p < 50000) {
+          price = p;
+          break;
+        }
+      }
+      if (price > 0) break;
+    }
+
+    if (!title || price <= 0) {
       return null;
     }
 
     let date = new Date().toISOString().split('T')[0];
+    const dateMatch = html.match(/Ended[^>]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
     if (dateMatch) {
       try {
         const parsedDate = new Date(dateMatch[1]);
@@ -284,7 +375,7 @@ async function scrapePwccDirectLink(url: string, logger: Logger): Promise<Direct
           date = parsedDate.toISOString().split('T')[0];
         }
       } catch (error) {
-        logger.warn('Failed to parse PWCC date', { dateStr: dateMatch[1] });
+        // Keep default date
       }
     }
 
@@ -293,13 +384,78 @@ async function scrapePwccDirectLink(url: string, logger: Logger): Promise<Direct
       price,
       date,
       source: 'PWCC',
-      image: imageMatch?.[1],
       url,
       condition: extractConditionFromTitle(title)
     };
 
   } catch (error) {
     logger.error('PWCC direct link scraping failed', error, { url });
+    return null;
+  }
+}
+
+async function scrapeGenericDirectLink(url: string, logger: Logger): Promise<DirectLinkResult | null> {
+  try {
+    const response = await withTimeout(
+      fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+      }),
+      8000,
+      'Generic direct link'
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const html = await response.text();
+    
+    // Generic title extraction
+    const titlePatterns = [
+      /<title>([^<]+)<\/title>/i,
+      /<h1[^>]*>([^<]+)<\/h1>/i,
+      /property="og:title"[^>]*content="([^"]+)"/i
+    ];
+    
+    let title = '';
+    for (const pattern of titlePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1] && match[1].trim().length > 10) {
+        title = match[1].trim();
+        break;
+      }
+    }
+
+    // Generic price extraction
+    const allPrices = [...html.matchAll(/\$([0-9,]+\.?\d*)/g)];
+    let price = 0;
+    
+    for (const match of allPrices) {
+      const p = parseFloat(match[1].replace(/,/g, ''));
+      if (p > 5 && p < 10000) {
+        price = p;
+        break;
+      }
+    }
+
+    if (!title || price <= 0) {
+      return null;
+    }
+
+    return {
+      title,
+      price,
+      date: new Date().toISOString().split('T')[0],
+      source: 'Generic',
+      url,
+      condition: extractConditionFromTitle(title)
+    };
+
+  } catch (error) {
+    logger.error('Generic direct link scraping failed', error, { url });
     return null;
   }
 }
