@@ -1,5 +1,6 @@
-import { EbayResult } from './ebay-scraper.ts';
-import { Point130Result } from './130point-scraper.ts';
+
+import { EbayResult, EbayError } from './ebay-scraper.ts';
+import { Point130Result, Point130Error } from './130point-scraper.ts';
 
 export interface NormalizedComp {
   title: string;
@@ -11,27 +12,90 @@ export interface NormalizedComp {
   matchScore?: number;
 }
 
-export function normalizeComps(resultsArray: (EbayResult | Point130Result)[]): NormalizedComp[] {
+export interface ScrapingError {
+  source: string;
+  message: string;
+}
+
+export interface NormalizationResult {
+  comps: NormalizedComp[];
+  errors: ScrapingError[];
+}
+
+export function combineAndNormalizeResults(
+  ebayResult: { results: EbayResult[], error?: EbayError },
+  point130Result: { results: Point130Result[], error?: Point130Error }
+): NormalizationResult {
+  console.log('=== COMBINING AND NORMALIZING REAL RESULTS ===');
+  console.log(`eBay: ${ebayResult.results.length} results${ebayResult.error ? ' (with error)' : ''}`);
+  console.log(`130Point: ${point130Result.results.length} results${point130Result.error ? ' (with error)' : ''}`);
+  
+  const allResults = [...ebayResult.results, ...point130Result.results];
+  const errors: ScrapingError[] = [];
+  
+  // Collect errors from sources
+  if (ebayResult.error) {
+    errors.push(ebayResult.error);
+    console.log('eBay error:', ebayResult.error.message);
+  }
+  
+  if (point130Result.error) {
+    errors.push(point130Result.error);
+    console.log('130Point error:', point130Result.error.message);
+  }
+  
+  // Normalize and validate results
+  const normalizedResults = normalizeComps(allResults);
+  
+  // Remove duplicates based on title and price similarity
+  const dedupedResults = deduplicateResults(normalizedResults);
+  
+  console.log(`Final normalized results: ${dedupedResults.length} comps, ${errors.length} errors`);
+  
+  return {
+    comps: dedupedResults,
+    errors
+  };
+}
+
+function normalizeComps(resultsArray: (EbayResult | Point130Result)[]): NormalizedComp[] {
   console.log('=== NORMALIZING COMPS ===');
   console.log(`Normalizing ${resultsArray.length} results`);
   
   return resultsArray
     .map(comp => {
       try {
-        const normalized: NormalizedComp = {
-          title: sanitizeTitle(comp.title),
-          price: parseFloat(comp.price?.toString() || '0'),
-          date: normalizeDate(comp.date),
-          source: comp.source,
-          image: comp.image,
-          url: comp.url
-        };
-        
-        // Validate required fields
-        if (!normalized.title || normalized.price <= 0 || !normalized.date) {
-          console.warn('Skipping invalid comp:', comp);
+        // Strict validation - reject invalid data
+        if (!comp.title || typeof comp.title !== 'string' || comp.title.trim().length === 0) {
+          console.warn('Rejecting comp with invalid title:', comp);
           return null;
         }
+        
+        const price = parseFloat(comp.price?.toString() || '0');
+        if (price <= 0 || isNaN(price)) {
+          console.warn('Rejecting comp with invalid price:', comp);
+          return null;
+        }
+        
+        const normalizedDate = normalizeDate(comp.date);
+        if (!normalizedDate) {
+          console.warn('Rejecting comp with invalid date:', comp);
+          return null;
+        }
+        
+        if (!comp.url || typeof comp.url !== 'string' || !isValidUrl(comp.url)) {
+          console.warn('Rejecting comp with invalid URL:', comp);
+          return null;
+        }
+        
+        const normalized: NormalizedComp = {
+          title: sanitizeTitle(comp.title),
+          price: Math.round(price * 100) / 100, // Round to 2 decimal places
+          date: normalizedDate,
+          source: comp.source,
+          image: comp.image && isValidUrl(comp.image) ? comp.image : undefined,
+          url: comp.url
+        };
         
         return normalized;
       } catch (error) {
@@ -44,48 +108,47 @@ export function normalizeComps(resultsArray: (EbayResult | Point130Result)[]): N
 }
 
 function sanitizeTitle(title: string): string {
-  if (!title || typeof title !== 'string') return 'Unknown Card';
-  
   return title
     .trim()
     .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-    .replace(/[^\w\s\-#.]/g, '') // Remove special characters except basic ones
+    .replace(/[^\w\s\-#.()]/g, '') // Remove special characters except basic ones
     .slice(0, 200); // Limit length
 }
 
-function normalizeDate(date: string | Date): string {
-  if (!date) return new Date().toISOString().split('T')[0];
+function normalizeDate(date: string | Date): string | null {
+  if (!date) return null;
   
   try {
     const dateObj = typeof date === 'string' ? new Date(date) : date;
     
     if (isNaN(dateObj.getTime())) {
-      return new Date().toISOString().split('T')[0];
+      return null;
+    }
+    
+    // Reject dates that are too far in the future or past
+    const now = new Date();
+    const oneYearAgo = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+    const oneWeekFuture = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    
+    if (dateObj < oneYearAgo || dateObj > oneWeekFuture) {
+      console.warn('Date outside reasonable range:', dateObj);
+      return null;
     }
     
     return dateObj.toISOString().split('T')[0];
   } catch (error) {
     console.error('Date normalization error:', error);
-    return new Date().toISOString().split('T')[0];
+    return null;
   }
 }
 
-export function combineAndNormalizeResults(
-  ebayResults: EbayResult[],
-  point130Results: Point130Result[]
-): NormalizedComp[] {
-  console.log('=== COMBINING AND NORMALIZING RESULTS ===');
-  console.log(`eBay: ${ebayResults.length} results`);
-  console.log(`130Point: ${point130Results.length} results`);
-  
-  const allResults = [...ebayResults, ...point130Results];
-  const normalizedResults = normalizeComps(allResults);
-  
-  // Remove duplicates based on title and price similarity
-  const dedupedResults = deduplicateResults(normalizedResults);
-  
-  console.log(`Final normalized results: ${dedupedResults.length}`);
-  return dedupedResults;
+function isValidUrl(url: string): boolean {
+  try {
+    const parsedUrl = new URL(url);
+    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function deduplicateResults(results: NormalizedComp[]): NormalizedComp[] {
@@ -93,8 +156,11 @@ function deduplicateResults(results: NormalizedComp[]): NormalizedComp[] {
   
   for (const result of results) {
     // Create a deduplication key based on title similarity and price
-    const normalizedTitle = result.title.toLowerCase().replace(/[^\w\s]/g, '').trim();
-    const priceRange = Math.floor(result.price / 10) * 10; // Group by $10 ranges
+    const normalizedTitle = result.title.toLowerCase()
+      .replace(/[^\w\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const priceRange = Math.floor(result.price / 5) * 5; // Group by $5 ranges
     const key = `${normalizedTitle}_${priceRange}`;
     
     // Keep the most recent result for each key

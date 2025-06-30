@@ -21,7 +21,7 @@ interface EstimationRequest {
   description?: string;
   sources: string[];
   compLogic: string;
-  useProductionScrapers?: boolean; // New flag to enable production scrapers
+  useProductionScrapers?: boolean;
 }
 
 interface EstimationResponse {
@@ -38,10 +38,14 @@ interface EstimationResponse {
   error?: string;
   details?: string;
   traceId?: string;
-  // New production fields
+  // Production fields
   exactMatchFound?: boolean;
   matchMessage?: string;
   productionResponse?: ProductionScraperResponse;
+  errors?: Array<{
+    source: string;
+    message: string;
+  }>;
 }
 
 serve(async (req) => {
@@ -70,6 +74,12 @@ serve(async (req) => {
     // Input validation
     if (!requestData.sources || requestData.sources.length === 0) {
       return errorResponse('No data sources selected', 'Please select at least one data source', 400);
+    }
+
+    // Validate sources
+    const validSources = requestData.sources.filter(s => ['ebay', '130point'].includes(s));
+    if (validSources.length === 0) {
+      return errorResponse('Invalid data sources', 'Please select valid data sources (ebay, 130point)', 400);
     }
 
     if (!requestData.image && !requestData.description?.trim()) {
@@ -114,159 +124,66 @@ serve(async (req) => {
       sport: cardInfo.sport
     };
 
-    // STEP 2: Choose scraping method
-    console.log('=== STEP 2: CHOOSING SCRAPING METHOD ===');
-    
-    if (requestData.useProductionScrapers) {
-      console.log('Using PRODUCTION SCRAPERS');
-      
-      try {
-        const productionResponse = await fetchProductionComps(
-          searchQuery,
-          requestData.sources,
-          requestData.compLogic
-        );
-        
-        const processingTime = Date.now() - startTime;
-        console.log(`=== PRODUCTION PROCESSING COMPLETE in ${processingTime}ms ===`);
-        
-        // Add warnings based on match quality
-        if (!productionResponse.exactMatchFound) {
-          warnings.push(productionResponse.matchMessage || 'No exact matches found');
-        }
-        
-        if (productionResponse.confidence < 0.5) {
-          warnings.push('Lower confidence estimate due to limited matching data');
-        }
-        
-        const response: EstimationResponse = {
-          success: true,
-          cardInfo,
-          estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
-          confidence: productionResponse.confidence,
-          methodology: productionResponse.methodology,
-          dataPoints: productionResponse.comps.length,
-          logicUsed: requestData.compLogic,
-          exactMatchFound: productionResponse.exactMatchFound,
-          matchMessage: productionResponse.matchMessage,
-          productionResponse,
-          warnings: warnings.length > 0 ? warnings : undefined
-        };
-
-        return new Response(
-          JSON.stringify(response),
-          {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          }
-        );
-        
-      } catch (error) {
-        console.error('Production scraper failed:', error);
-        warnings.push('Production scrapers failed, falling back to legacy system');
-        // Fall through to legacy system
-      }
-    }
-
-    // STEP 2 (Legacy): Fetch Real Sales Data
-    console.log('=== STEP 2: REAL SALES DATA FETCH (LEGACY) ===');
-    let salesResults: SalesResult[];
+    // STEP 2: Use Production Scrapers (Real Data Only)
+    console.log('=== STEP 2: PRODUCTION SCRAPING (REAL DATA ONLY) ===');
     
     try {
-      salesResults = await fetchRealSalesData(searchQuery, requestData.sources);
-      console.log(`Found ${salesResults.length} total sales results`);
-      
-      if (salesResults.length === 0) {
-        // Try broader search without card number or grade
-        console.log('No exact matches, trying broader search...');
-        const broaderQuery = {
-          ...searchQuery,
-          cardNumber: '',
-          grade: undefined
-        };
-        
-        salesResults = await fetchRealSalesData(broaderQuery, requestData.sources);
-        
-        if (salesResults.length > 0) {
-          warnings.push(`No exact matches found. Showing ${salesResults.length} similar cards. Results may be less accurate.`);
-        } else {
-          warnings.push('No sales data found for this card. This may be a rare or recently released card.');
-        }
-      }
-      
-    } catch (error) {
-      console.error('Sales data fetch failed:', error);
-      return errorResponse('Sales data fetch failed', error.message, 500, 'sales-fetch-error');
-    }
-
-    // STEP 3: Calculate Estimated Value
-    console.log('=== STEP 3: VALUE CALCULATION ===');
-    let calculationResult: CalculationResult;
-    
-    try {
-      // Mark all results as selected by default
-      const salesWithSelection = salesResults.map(result => ({
-        ...result,
-        selected: true
-      }));
-      
-      calculationResult = calculateEstimatedValue(
-        salesWithSelection,
-        requestData.compLogic,
-        cardInfo.confidence
+      const productionResponse = await fetchProductionComps(
+        searchQuery,
+        validSources,
+        requestData.compLogic
       );
       
-      console.log('Calculation result:', calculationResult);
+      const processingTime = Date.now() - startTime;
+      console.log(`=== PRODUCTION PROCESSING COMPLETE in ${processingTime}ms ===`);
       
-      // Add price consistency warnings
-      const consistencyWarnings = validatePriceConsistency(salesWithSelection);
-      warnings.push(...consistencyWarnings);
+      // Add warnings based on match quality and errors
+      if (!productionResponse.exactMatchFound) {
+        warnings.push(productionResponse.matchMessage || 'No exact matches found');
+      }
+      
+      if (productionResponse.confidence < 0.5) {
+        warnings.push('Lower confidence estimate due to limited matching data');
+      }
+      
+      // Add source-specific error warnings
+      if (productionResponse.errors && productionResponse.errors.length > 0) {
+        productionResponse.errors.forEach(error => {
+          warnings.push(`${error.source} error: ${error.message}`);
+        });
+      }
+      
+      const response: EstimationResponse = {
+        success: true,
+        cardInfo,
+        estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
+        confidence: productionResponse.confidence,
+        methodology: productionResponse.methodology,
+        dataPoints: productionResponse.comps.length,
+        logicUsed: requestData.compLogic,
+        exactMatchFound: productionResponse.exactMatchFound,
+        matchMessage: productionResponse.matchMessage,
+        productionResponse,
+        errors: productionResponse.errors,
+        warnings: warnings.length > 0 ? warnings : undefined
+      };
+
+      return new Response(
+        JSON.stringify(response),
+        {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
       
     } catch (error) {
-      console.error('Value calculation failed:', error);
-      return errorResponse('Value calculation failed', error.message, 500, 'calculation-error');
+      console.error('Production scraper failed:', error);
+      return errorResponse(
+        'Data scraping failed', 
+        `Failed to fetch real sales data: ${error.message}`, 
+        500, 
+        'scraping-error'
+      );
     }
-
-    // STEP 4: Final Quality Checks
-    console.log('=== STEP 4: QUALITY VALIDATION ===');
-    
-    // Check for very low match scores
-    const avgMatchScore = salesResults.reduce((sum, r) => sum + (r.matchScore || 0), 0) / Math.max(1, salesResults.length);
-    if (avgMatchScore < 0.3) {
-      warnings.push('Low similarity between search and found results. Consider refining your search.');
-    }
-    
-    // Check for stale data
-    const recentSales = salesResults.filter(r => {
-      const daysSince = (Date.now() - new Date(r.date).getTime()) / (1000 * 60 * 60 * 24);
-      return daysSince <= 90;
-    });
-    
-    if (recentSales.length < salesResults.length / 2) {
-      warnings.push('Many results are from older sales. Current market value may differ.');
-    }
-
-    const processingTime = Date.now() - startTime;
-    console.log(`=== PROCESSING COMPLETE in ${processingTime}ms ===`);
-
-    const response: EstimationResponse = {
-      success: true,
-      cardInfo,
-      salesResults: salesResults.map(r => ({ ...r, selected: true })),
-      estimatedValue: calculationResult.estimatedValue,
-      confidence: calculationResult.confidence,
-      methodology: calculationResult.methodology,
-      dataPoints: calculationResult.dataPoints,
-      priceRange: calculationResult.priceRange,
-      logicUsed: requestData.compLogic,
-      warnings: warnings.length > 0 ? warnings : undefined
-    };
-
-    return new Response(
-      JSON.stringify(response),
-      {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      }
-    );
 
   } catch (error) {
     console.error('=== UNHANDLED ERROR ===');

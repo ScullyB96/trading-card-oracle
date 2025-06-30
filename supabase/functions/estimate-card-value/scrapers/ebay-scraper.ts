@@ -8,27 +8,43 @@ export interface EbayResult {
   source: string;
 }
 
-export async function fetchEbayComps(searchQuery: string): Promise<EbayResult[]> {
-  console.log('=== FETCHING EBAY COMPS ===');
+export interface EbayError {
+  source: string;
+  message: string;
+}
+
+export async function fetchEbayComps(searchQuery: string): Promise<{ results: EbayResult[], error?: EbayError }> {
+  console.log('=== FETCHING EBAY COMPS (REAL DATA ONLY) ===');
   console.log('Search query:', searchQuery);
   
   try {
-    // eBay Browse API approach (requires OAuth2 setup)
+    // First attempt: eBay Browse API if key is available
     const ebayApiKey = Deno.env.get('EBAY_API_KEY');
     
     if (ebayApiKey) {
-      return await fetchEbayAPI(searchQuery, ebayApiKey);
-    } else {
-      console.log('No eBay API key found, using scraping fallback');
-      return await scrapeEbaySoldListings(searchQuery);
+      const apiResult = await fetchEbayAPI(searchQuery, ebayApiKey);
+      if (apiResult.results.length > 0) {
+        return apiResult;
+      }
+      console.log('eBay API returned no results, trying scraping fallback');
     }
+    
+    // Fallback: HTML scraping of sold listings
+    return await scrapeEbaySoldListings(searchQuery);
+    
   } catch (error) {
     console.error('eBay fetching failed:', error);
-    throw new Error(`eBay integration failed: ${error.message}`);
+    return {
+      results: [],
+      error: {
+        source: 'eBay',
+        message: `eBay integration failed: ${error.message}`
+      }
+    };
   }
 }
 
-async function fetchEbayAPI(searchQuery: string, apiKey: string): Promise<EbayResult[]> {
+async function fetchEbayAPI(searchQuery: string, apiKey: string): Promise<{ results: EbayResult[], error?: EbayError }> {
   console.log('Using eBay Browse API');
   
   const endpoint = 'https://api.ebay.com/buy/browse/v1/item_summary/search';
@@ -38,11 +54,12 @@ async function fetchEbayAPI(searchQuery: string, apiKey: string): Promise<EbayRe
     'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
   };
   
+  // Search for SOLD listings only
   const params = new URLSearchParams({
     q: searchQuery,
-    filter: 'conditionIds:{3000|3001|3002|3003|3004|3005},buyingOptions:{AUCTION|FIXED_PRICE},deliveryCountry:US,itemLocationCountry:US',
+    filter: 'conditionIds:{3000|3001|3002|3003|3004|3005},buyingOptions:{AUCTION|FIXED_PRICE},deliveryCountry:US,itemLocationCountry:US,itemEndDate:[2024-01-01T00:00:00.000Z..],soldItemsOnly:true',
     sort: 'endTimeNewest',
-    limit: '30',
+    limit: '50',
     offset: '0'
   });
   
@@ -54,18 +71,25 @@ async function fetchEbayAPI(searchQuery: string, apiKey: string): Promise<EbayRe
   
   const data = await response.json();
   
-  return data.itemSummaries?.map((item: any) => ({
+  if (!data.itemSummaries || data.itemSummaries.length === 0) {
+    return { results: [] };
+  }
+  
+  const results = data.itemSummaries.map((item: any) => ({
     title: item.title,
     price: parseFloat(item.price?.value || '0'),
     date: item.itemEndDate ? new Date(item.itemEndDate).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
     image: item.image?.imageUrl,
     url: item.itemWebUrl,
     source: 'eBay'
-  })) || [];
+  })).filter((item: EbayResult) => item.price > 0);
+  
+  console.log(`eBay API found ${results.length} real results`);
+  return { results };
 }
 
-async function scrapeEbaySoldListings(searchQuery: string): Promise<EbayResult[]> {
-  console.log('Using eBay scraping fallback');
+async function scrapeEbaySoldListings(searchQuery: string): Promise<{ results: EbayResult[], error?: EbayError }> {
+  console.log('Scraping eBay sold listings');
   
   // Construct eBay sold listings search URL
   const encodedQuery = encodeURIComponent(searchQuery);
@@ -76,16 +100,17 @@ async function scrapeEbaySoldListings(searchQuery: string): Promise<EbayResult[]
   try {
     const response = await fetch(searchUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache'
       }
     });
     
     if (!response.ok) {
-      throw new Error(`eBay scraping failed: ${response.status}`);
+      throw new Error(`eBay scraping failed: ${response.status} ${response.statusText}`);
     }
     
     const html = await response.text();
@@ -93,120 +118,104 @@ async function scrapeEbaySoldListings(searchQuery: string): Promise<EbayResult[]
     // Parse HTML to extract sold listings
     const results = parseEbayHTML(html, searchUrl);
     
-    console.log(`eBay scraping found ${results.length} results`);
-    return results.slice(0, 30); // Limit to top 30
+    if (results.length === 0) {
+      return {
+        results: [],
+        error: {
+          source: 'eBay',
+          message: 'No sold listings found for this search query'
+        }
+      };
+    }
+    
+    console.log(`eBay scraping found ${results.length} real results`);
+    return { results: results.slice(0, 30) }; // Limit to top 30
     
   } catch (error) {
     console.error('eBay scraping error:', error);
-    
-    // If scraping fails, return realistic fallback data based on search query
-    return generateEbayFallbackData(searchQuery);
+    return {
+      results: [],
+      error: {
+        source: 'eBay',
+        message: `eBay scraping failed: ${error.message}`
+      }
+    };
   }
 }
 
 function parseEbayHTML(html: string, searchUrl: string): EbayResult[] {
   const results: EbayResult[] = [];
   
-  // Simple regex-based parsing (in production, use a proper HTML parser)
-  const titleRegex = /s-item__title[^>]*>([^<]+)</g;
-  const priceRegex = /s-item__price[^>]*>\$([0-9,]+\.?[0-9]*)/g;
-  const dateRegex = /s-item__endedDate[^>]*>([^<]+)</g;
-  const linkRegex = /s-item__link[^>]*href="([^"]+)"/g;
-  
-  let titleMatch, priceMatch, dateMatch, linkMatch;
-  let index = 0;
-  
-  // Extract titles
-  const titles: string[] = [];
-  while ((titleMatch = titleRegex.exec(html)) !== null && index < 30) {
-    titles.push(titleMatch[1].trim());
-  }
-  
-  // Extract prices
-  const prices: number[] = [];
-  index = 0;
-  while ((priceMatch = priceRegex.exec(html)) !== null && index < 30) {
-    prices.push(parseFloat(priceMatch[1].replace(',', '')));
-    index++;
-  }
-  
-  // Extract dates
-  const dates: string[] = [];
-  index = 0;
-  while ((dateMatch = dateRegex.exec(html)) !== null && index < 30) {
-    const dateStr = dateMatch[1].trim();
-    const parsedDate = new Date(dateStr);
-    dates.push(isNaN(parsedDate.getTime()) ? new Date().toISOString().split('T')[0] : parsedDate.toISOString().split('T')[0]);
-    index++;
-  }
-  
-  // Extract links
-  const links: string[] = [];
-  index = 0;
-  while ((linkMatch = linkRegex.exec(html)) !== null && index < 30) {
-    links.push(linkMatch[1]);
-    index++;
-  }
-  
-  // Combine results
-  const maxResults = Math.min(titles.length, prices.length, 30);
-  for (let i = 0; i < maxResults; i++) {
-    if (titles[i] && prices[i]) {
-      results.push({
-        title: titles[i],
-        price: prices[i],
-        date: dates[i] || new Date().toISOString().split('T')[0],
-        url: links[i] || searchUrl,
-        source: 'eBay'
-      });
+  try {
+    // Look for sold listing patterns in eBay HTML
+    // This is a simplified parser - in production you'd want more robust parsing
+    const itemRegex = /<div[^>]*class="[^"]*s-item[^"]*"[^>]*>[\s\S]*?<\/div>/g;
+    const titleRegex = /<h3[^>]*class="[^"]*s-item__title[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/;
+    const priceRegex = /<span[^>]*class="[^"]*s-item__price[^"]*"[^>]*>(?:<[^>]*>)*\$([0-9,]+\.?[0-9]*)/;
+    const dateRegex = /<span[^>]*class="[^"]*s-item__endedDate[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/;
+    const linkRegex = /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"/;
+    const imageRegex = /<img[^>]*src="([^"]*)"[^>]*class="[^"]*s-item__image[^"]*"/;
+    
+    let itemMatch;
+    while ((itemMatch = itemRegex.exec(html)) !== null && results.length < 50) {
+      const itemHtml = itemMatch[0];
+      
+      const titleMatch = titleRegex.exec(itemHtml);
+      const priceMatch = priceRegex.exec(itemHtml);
+      const dateMatch = dateRegex.exec(itemHtml);
+      const linkMatch = linkRegex.exec(itemHtml);
+      const imageMatch = imageRegex.exec(itemHtml);
+      
+      if (titleMatch && priceMatch) {
+        const price = parseFloat(priceMatch[1].replace(',', ''));
+        const dateStr = dateMatch ? dateMatch[1].trim() : '';
+        
+        // Parse date - eBay uses formats like "Sold Jun 15, 2024"
+        let parsedDate = new Date().toISOString().split('T')[0];
+        if (dateStr && dateStr.includes('Sold')) {
+          try {
+            const dateOnly = dateStr.replace('Sold ', '').trim();
+            const parsed = new Date(dateOnly);
+            if (!isNaN(parsed.getTime())) {
+              parsedDate = parsed.toISOString().split('T')[0];
+            }
+          } catch (e) {
+            // Use current date if parsing fails
+          }
+        }
+        
+        results.push({
+          title: titleMatch[1].trim(),
+          price: price,
+          date: parsedDate,
+          url: linkMatch ? linkMatch[1] : searchUrl,
+          image: imageMatch ? imageMatch[1] : undefined,
+          source: 'eBay'
+        });
+      }
     }
+    
+  } catch (error) {
+    console.error('HTML parsing error:', error);
   }
   
-  return results;
+  return results.filter(r => r.price > 0); // Only return items with valid prices
 }
 
-function generateEbayFallbackData(searchQuery: string): EbayResult[] {
-  console.log('Using eBay fallback data generation');
+// Rate limiting
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 2000; // 2 seconds between requests
+
+async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
   
-  // Generate realistic fallback data based on search query patterns
-  const results: EbayResult[] = [];
-  const numResults = Math.floor(Math.random() * 10) + 5; // 5-15 results
-  
-  for (let i = 0; i < numResults; i++) {
-    const basePrice = estimatePriceFromQuery(searchQuery);
-    const variation = (Math.random() - 0.5) * 0.6; // ±30% variation
-    const price = Math.max(5, Math.round(basePrice * (1 + variation)));
-    
-    const daysAgo = Math.floor(Math.random() * 60) + 1;
-    const saleDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
-    
-    const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(searchQuery)}&_sacat=0&LH_Sold=1&LH_Complete=1`;
-    
-    results.push({
-      title: `${searchQuery} - Sports Trading Card`,
-      price: price,
-      date: saleDate.toISOString().split('T')[0],
-      url: searchUrl,
-      source: 'eBay'
-    });
+  if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+    const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+    console.log(`Rate limiting: waiting ${waitTime}ms`);
+    await new Promise(resolve => setTimeout(resolve, waitTime));
   }
   
-  return results;
-}
-
-function estimatePriceFromQuery(query: string): number {
-  const lowerQuery = query.toLowerCase();
-  let basePrice = 25;
-  
-  // Adjust based on keywords
-  if (lowerQuery.includes('psa 10') || lowerQuery.includes('bgs 10')) basePrice *= 4;
-  else if (lowerQuery.includes('psa 9') || lowerQuery.includes('bgs 9')) basePrice *= 2.5;
-  else if (lowerQuery.includes('psa') || lowerQuery.includes('bgs')) basePrice *= 1.5;
-  
-  if (lowerQuery.includes('rookie') || lowerQuery.includes('rc')) basePrice *= 2;
-  if (lowerQuery.includes('refractor') || lowerQuery.includes('chrome')) basePrice *= 1.8;
-  if (lowerQuery.includes('auto') || lowerQuery.includes('autograph')) basePrice *= 3;
-  if (lowerQuery.includes('patch') || lowerQuery.includes('jersey')) basePrice *= 1.5;
-  
-  return Math.round(basePrice);
+  lastRequestTime = Date.now();
+  return fetch(url, options);
 }
