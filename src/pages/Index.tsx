@@ -93,6 +93,7 @@ const Index = () => {
       });
 
       if (error) {
+        console.error('Supabase function error:', error);
         throw error;
       }
 
@@ -106,17 +107,32 @@ const Index = () => {
         });
       } else {
         // Handle specific error cases with better messaging
-        if (data.traceId === 'vision-api-disabled') {
+        console.error('Function returned error:', data);
+        
+        if (data.traceId === 'billing-disabled') {
+          toast({
+            title: "Google Vision API Billing Required",
+            description: "Google Vision API requires billing to be enabled. Please switch to the 'Describe Card' tab.",
+            variant: "destructive"
+          });
+          
+          // Automatically switch to description tab
+          setActiveTab("description");
+        } else if (data.traceId === 'vision-api-disabled') {
           toast({
             title: "Google Vision API Not Enabled",
-            description: data.details,
+            description: data.details || "Please use the card description instead.",
             variant: "destructive"
           });
           
           // Automatically switch to description tab as suggested
           setActiveTab("description");
         } else {
-          throw new Error(data.error || 'Failed to estimate card value');
+          toast({
+            title: data.error || "Error",
+            description: data.details || "Failed to analyze the card. Please try again.",
+            variant: "destructive"
+          });
         }
       }
 
@@ -126,11 +142,16 @@ const Index = () => {
       let errorMessage = "Failed to estimate card value. Please try again.";
       let errorTitle = "Error";
       
-      // Check if it's a vision API error
-      if (error.message && error.message.includes('Vision API')) {
-        errorTitle = "Vision API Issue";
-        errorMessage = "There's an issue with the image processing. Please try using the card description instead.";
-        setActiveTab("description"); // Switch to description tab
+      // Handle different types of errors
+      if (error.name === 'FunctionsHttpError') {
+        errorTitle = "Service Error";
+        errorMessage = "There was an issue processing your request. Please try again or use the card description instead.";
+        
+        // If it was an image processing issue, switch to description tab
+        if (activeTab === "image") {
+          setActiveTab("description");
+          errorMessage = "There was an issue processing the image. Please try using the card description instead.";
+        }
       }
       
       toast({

@@ -93,18 +93,34 @@ serve(async (req) => {
       } catch (error) {
         console.error('Image processing failed:', error);
         
-        // If Google Vision API is not enabled, provide helpful error message
+        // Check for specific Google Vision API errors
+        if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: 'Google Vision API billing not enabled',
+              details: 'The Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project or use the "Describe Card" tab instead.',
+              suggestion: 'Switch to the "Describe Card" tab to continue without image processing.',
+              traceId: 'billing-disabled'
+            }),
+            {
+              status: 400, // Changed from 500 to 400 since it's a configuration issue
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            }
+          );
+        }
+
         if (error.message.includes('Cloud Vision API has not been used') || error.message.includes('SERVICE_DISABLED')) {
           return new Response(
             JSON.stringify({
               success: false,
               error: 'Google Vision API not enabled',
-              details: 'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it at: https://console.developers.google.com/apis/api/vision.googleapis.com/overview or use the card description option instead.',
+              details: 'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it or use the card description option instead.',
               suggestion: 'Try using the "Describe Card" tab instead of uploading an image.',
               traceId: 'vision-api-disabled'
             }),
             {
-              status: 400,
+              status: 400, // Changed from 500 to 400 since it's a configuration issue
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             }
           );
@@ -119,7 +135,7 @@ serve(async (req) => {
             traceId: 'image-processing-error'
           }),
           {
-            status: 500,
+            status: 400, // Changed from 500 to 400 for client-side issues
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           }
         );
@@ -284,14 +300,25 @@ async function extractTextFromImage(base64Image: string): Promise<string> {
       // Parse the error to provide more specific messages
       try {
         const errorData = JSON.parse(errorText);
-        if (errorData.error?.message?.includes('Cloud Vision API has not been used')) {
-          throw new Error('Cloud Vision API has not been used in project before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/vision.googleapis.com/overview then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.');
+        if (errorData.error?.details) {
+          // Check for billing disabled error
+          const billingDisabled = errorData.error.details.some((detail: any) => 
+            detail.reason === 'BILLING_DISABLED'
+          );
+          if (billingDisabled) {
+            throw new Error('BILLING_DISABLED: Google Vision API requires billing to be enabled on your Google Cloud project.');
+          }
         }
+        
+        if (errorData.error?.message?.includes('Cloud Vision API has not been used')) {
+          throw new Error('SERVICE_DISABLED: Cloud Vision API has not been used in project before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/vision.googleapis.com/overview then retry.');
+        }
+        
+        throw new Error(`Google Vision API error: ${errorData.error?.message || errorText}`);
       } catch (parseError) {
         // If we can't parse the error, use the original message
+        throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
       }
-      
-      throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
