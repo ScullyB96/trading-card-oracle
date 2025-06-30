@@ -1,5 +1,5 @@
 
-import { useCallback } from "react";
+import { useCallback, memo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Upload, X, Image as ImageIcon } from "lucide-react";
@@ -9,7 +9,7 @@ interface ImageUploadProps {
   uploadedImage: File | null;
 }
 
-export const ImageUpload = ({ onImageUpload, uploadedImage }: ImageUploadProps) => {
+const ImageUploadComponent = ({ onImageUpload, uploadedImage }: ImageUploadProps) => {
   const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file && file.type.startsWith('image/')) {
@@ -29,9 +29,9 @@ export const ImageUpload = ({ onImageUpload, uploadedImage }: ImageUploadProps) 
     event.preventDefault();
   }, []);
 
-  const removeImage = () => {
+  const removeImage = useCallback(() => {
     onImageUpload(null);
-  };
+  }, [onImageUpload]);
 
   const imageUrl = uploadedImage ? URL.createObjectURL(uploadedImage) : null;
 
@@ -105,3 +105,5 @@ export const ImageUpload = ({ onImageUpload, uploadedImage }: ImageUploadProps) 
     </div>
   );
 };
+
+export const ImageUpload = memo(ImageUploadComponent);

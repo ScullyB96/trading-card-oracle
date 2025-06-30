@@ -1,4 +1,5 @@
 
+import { memo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Globe } from "lucide-react";
@@ -23,7 +24,7 @@ const sources = [
   }
 ];
 
-export const SourceSelection = ({ selectedSources, onSourcesChange }: SourceSelectionProps) => {
+const SourceSelectionComponent = ({ selectedSources, onSourcesChange }: SourceSelectionProps) => {
   const handleSourceToggle = (sourceId: string) => {
     if (selectedSources.includes(sourceId)) {
       onSourcesChange(selectedSources.filter(id => id !== sourceId));
@@ -79,3 +80,5 @@ export const SourceSelection = ({ selectedSources, onSourcesChange }: SourceSele
     </Card>
   );
 };
+
+export const SourceSelection = memo(SourceSelectionComponent);

@@ -34,7 +34,7 @@ export function loadConfiguration(): AppConfig {
     googleVisionApiKey: Deno.env.get('Google API Key') || '',
     openaiApiKey: Deno.env.get('OPEN AI KEY') || '',
     googleSearchApiKey: Deno.env.get('Google Search API Key') || '',
-    googleSearchEngineId: '5274c6b1baf5d4de5',
+    googleSearchEngineId: Deno.env.get('Google Search ENGINE ID') || '',
     supabaseUrl: Deno.env.get('SUPABASE_URL') || '',
     supabaseAnonKey: Deno.env.get('SUPABASE_ANON_KEY') || '',
     timeout: {
@@ -59,6 +59,10 @@ export function loadConfiguration(): AppConfig {
   // Only validate critical configuration - allow some to be missing for graceful degradation
   if (!config.supabaseUrl || !config.supabaseAnonKey) {
     throw new ConfigurationError('Missing required Supabase configuration');
+  }
+
+  if (!config.googleSearchApiKey || !config.googleSearchEngineId) {
+    throw new ConfigurationError('Missing required Google Search configuration');
   }
 
   // Log confirmation for successful configurations instead of warnings

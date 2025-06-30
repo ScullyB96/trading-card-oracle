@@ -1,4 +1,5 @@
 
+import { memo } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FileText } from "lucide-react";
@@ -8,7 +9,7 @@ interface CardDescriptionProps {
   onDescriptionChange: (description: string) => void;
 }
 
-export const CardDescription = ({ description, onDescriptionChange }: CardDescriptionProps) => {
+const CardDescriptionComponent = ({ description, onDescriptionChange }: CardDescriptionProps) => {
   return (
     <Card className="border border-gray-200">
       <CardHeader className="pb-3">
@@ -40,3 +41,5 @@ export const CardDescription = ({ description, onDescriptionChange }: CardDescri
     </Card>
   );
 };
+
+export const CardDescription = memo(CardDescriptionComponent);

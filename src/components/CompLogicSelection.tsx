@@ -1,4 +1,5 @@
 
+import { memo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Calculator } from "lucide-react";
@@ -41,7 +42,7 @@ const compOptions = [
   }
 ];
 
-export const CompLogicSelection = ({ compLogic, onCompLogicChange }: CompLogicSelectionProps) => {
+const CompLogicSelectionComponent = ({ compLogic, onCompLogicChange }: CompLogicSelectionProps) => {
   const selectedOption = compOptions.find(option => option.value === compLogic);
 
   return (
@@ -81,3 +82,5 @@ export const CompLogicSelection = ({ compLogic, onCompLogicChange }: CompLogicSe
     </Card>
   );
 };
+
+export const CompLogicSelection = memo(CompLogicSelectionComponent);
