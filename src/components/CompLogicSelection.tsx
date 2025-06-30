@@ -83,4 +83,6 @@ const CompLogicSelectionComponent = ({ compLogic, onCompLogicChange }: CompLogic
   );
 };
 
+export const CompLogicSelectionComponent = memo(CompLogicSelectionComponent);
+
 export const CompLogicSelection = memo(CompLogicSelectionComponent);
