@@ -36,13 +36,13 @@ export async function extractCardInfoFromImage(base64Image: string): Promise<Ext
       console.log('Low text extraction, trying document OCR fallback');
       const documentText = await extractDocumentText(base64Image);
       if (documentText && documentText.length >= 3) {
-        return await extractKeywordsFromText(documentText);
+        return await extractStructuredKeywords(documentText);
       }
       
       throw new ImageParsingError('Could not extract sufficient text from image. Please try a clearer image or use the "Describe Card" tab instead.');
     }
     
-    return await extractKeywordsFromText(cleanedText);
+    return await extractStructuredKeywords(cleanedText);
     
   } catch (error) {
     console.error('Vision processing failed:', error);
@@ -150,32 +150,33 @@ async function extractDocumentText(base64Image: string): Promise<string> {
   }
 }
 
-async function extractKeywordsFromText(text: string): Promise<ExtractedCardKeywords> {
-  console.log('Extracting structured keywords with OpenAI');
+async function extractStructuredKeywords(text: string): Promise<ExtractedCardKeywords> {
+  console.log('ENHANCED: Extracting structured keywords with AI');
   
   try {
     if (!config.openaiApiKey) {
-      throw new ConfigurationError('OpenAI API key not configured');
+      console.warn('OpenAI not available, using enhanced regex fallback');
+      return enhancedRegexExtraction(text);
     }
 
-    const prompt = `Analyze this trading card text and extract structured information. Return ONLY valid JSON.
+    const prompt = `Analyze this trading card text and extract ALL relevant information for search optimization. Return ONLY valid JSON.
 
 Text: "${text}"
 
-Extract these fields exactly as JSON:
+Extract these fields EXACTLY as JSON (be thorough with keywords):
 {
   "player": "Full player name (or 'unknown' if not found)",
   "team": "Team name if mentioned (or null)",
   "year": "4-digit year (or 'unknown' if not found)",
-  "set": "Card set name like 'Prizm', 'Phoenix', 'Select' (or 'unknown' if not found)",
+  "set": "Card set name like 'Prizm', 'Phoenix', 'Select', 'Chrome' (or 'unknown' if not found)",
   "cardNumber": "Card number after # symbol (or 'unknown' if not found)",
-  "parallels": ["Array of parallel types like 'Silver', 'Holo', 'Refractor', 'Bronze Fade'"],
-  "specialAttributes": ["Array of special terms like 'RC', 'Rookie Card', 'Autograph', 'Patch', 'SSP'"],
+  "parallels": ["Array of ALL parallel types like 'Silver', 'Holo', 'Refractor', 'Bronze Fade', 'Red Wave'"],
+  "specialAttributes": ["Array of ALL special terms like 'RC', 'Rookie Card', 'Autograph', 'Patch', 'SP', 'SSP', 'numbered'"],
   "grade": "PSA/BGS grade if mentioned (or null)",
   "sport": "Sport type: 'football', 'basketball', 'baseball', or 'unknown'"
 }
 
-Focus on extracting ALL relevant keywords that could be used in search queries.`;
+IMPORTANT: Extract EVERY possible search keyword that could help find this card. Be comprehensive with parallels and special attributes.`;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -187,36 +188,37 @@ Focus on extracting ALL relevant keywords that could be used in search queries.`
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        max_tokens: 500,
+        max_tokens: 600,
         response_format: { type: "json_object" }
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+      console.error('OpenAI API error:', errorText);
+      return enhancedRegexExtraction(text);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
     
     if (!content) {
-      throw new Error('No response from OpenAI');
+      console.warn('No OpenAI response, using enhanced regex fallback');
+      return enhancedRegexExtraction(text);
     }
 
     const parsedResult = JSON.parse(content);
-    console.log('Parsed OpenAI structured result:', parsedResult);
+    console.log('ENHANCED: AI extracted comprehensive keywords:', parsedResult);
     
-    return validateAndSanitizeKeywords(parsedResult, text);
+    return validateAndEnrichKeywords(parsedResult, text);
 
   } catch (error) {
-    console.error('Failed to extract keywords with OpenAI:', error);
-    console.log('Attempting fallback regex parsing');
-    return parseWithRegexFallback(text);
+    console.error('ENHANCED: AI extraction failed, using enhanced regex:', error);
+    return enhancedRegexExtraction(text);
   }
 }
 
-function validateAndSanitizeKeywords(parsedResult: any, rawText: string): ExtractedCardKeywords {
+function validateAndEnrichKeywords(parsedResult: any, rawText: string): ExtractedCardKeywords {
   const player = sanitizeString(parsedResult.player || 'unknown');
   const team = parsedResult.team ? sanitizeString(parsedResult.team) : undefined;
   const year = sanitizeString(parsedResult.year || 'unknown');
@@ -233,29 +235,31 @@ function validateAndSanitizeKeywords(parsedResult: any, rawText: string): Extrac
     throw new ValidationError('Missing required player name in parsed result', 'player');
   }
 
-  // Calculate confidence based on extracted data richness
-  let confidence = 0.3; // Base confidence
+  // Enhanced confidence calculation based on keyword richness
+  let confidence = 0.2; // Base confidence
   const scoringFactors = [
-    { field: player, weight: 0.3 },
-    { field: year, weight: 0.2 },
-    { field: set, weight: 0.2 },
-    { field: cardNumber, weight: 0.1 },
-    { field: sport, weight: 0.1 }
+    { field: player, weight: 0.25, condition: (f: string) => f !== 'unknown' && f.length > 2 },
+    { field: year, weight: 0.20, condition: (f: string) => f !== 'unknown' && /^\d{4}$/.test(f) },
+    { field: set, weight: 0.20, condition: (f: string) => f !== 'unknown' && f.length > 2 },
+    { field: cardNumber, weight: 0.10, condition: (f: string) => f !== 'unknown' && f.length > 0 },
+    { field: sport, weight: 0.10, condition: (f: string) => f !== 'unknown' && ['football', 'basketball', 'baseball'].includes(f) }
   ];
   
   scoringFactors.forEach(factor => {
-    if (factor.field && factor.field !== 'unknown' && factor.field.trim().length > 0) {
+    if (factor.condition(factor.field)) {
       confidence += factor.weight;
     }
   });
   
-  // Bonus for parallels and special attributes
+  // Bonus for rich keyword extraction
   if (parallels.length > 0) confidence += 0.05;
   if (specialAttributes.length > 0) confidence += 0.05;
-  if (team) confidence += 0.05;
-  if (grade) confidence += 0.05;
+  if (team) confidence += 0.03;
+  if (grade) confidence += 0.02;
 
   confidence = Math.min(0.98, confidence);
+
+  console.log(`ENHANCED: Final confidence score: ${confidence.toFixed(2)} based on keyword richness`);
 
   return {
     player,
@@ -277,19 +281,21 @@ function sanitizeString(str: string): string {
   return str.trim().replace(/[^\w\s\-#.()]/g, '').slice(0, 100);
 }
 
-function parseWithRegexFallback(text: string): ExtractedCardKeywords {
-  console.log('Using regex fallback parsing');
+function enhancedRegexExtraction(text: string): ExtractedCardKeywords {
+  console.log('ENHANCED: Using comprehensive regex parsing');
   
   const cleanedText = text.replace(/sold via:\s*ebay/gi, '').replace(/\s+/g, ' ').trim();
 
+  // Enhanced pattern matching
   const patterns = {
     year: /\b(19|20)\d{2}\b/,
     player: /(?:^|\s)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?=\s|$)/,
-    set: /\b(Prizm|Phoenix|Donruss|Topps|Panini|Select|Optic|Chronicles|Contenders|Gridiron Kings)\b/i,
+    set: /\b(Prizm|Phoenix|Donruss|Topps|Panini|Select|Optic|Chronicles|Contenders|Gridiron Kings|Chrome|Bowman|Update|Stadium Club)\b/i,
     cardNumber: /#(\d+)/,
     grade: /(PSA|BGS|SGC)\s*(\d+(?:\.\d+)?)/i,
-    parallels: /\b(Silver|Gold|Holo|Refractor|Bronze|Fade|Rainbow|Prizm)\b/gi,
-    specialAttributes: /\b(RC|Rookie|Auto|Autograph|Patch|Jersey|SSP|SP)\b/gi
+    parallels: /\b(Silver|Gold|Holo|Refractor|Bronze|Fade|Rainbow|Prizm|Red|Blue|Green|Orange|Purple|Black|White|Wave|Mojo)\b/gi,
+    specialAttributes: /\b(RC|Rookie|Auto|Autograph|Patch|Jersey|SP|SSP|numbered|\/\d+)\b/gi,
+    team: /\b(Cowboys|Chiefs|Bills|Patriots|Packers|Steelers|Eagles|49ers|Seahawks|Saints|Falcons|Panthers|Buccaneers|Cardinals|Rams|Chargers|Raiders|Broncos|Colts|Texans|Titans|Jaguars|Browns|Ravens|Bengals|Jets|Dolphins|Commanders|Giants|Lakers|Warriors|Celtics|Heat|Bulls|Knicks|Nets|76ers|Raptors|Magic|Hawks|Hornets|Pistons|Pacers|Cavaliers|Bucks|Timberwolves|Thunder|Trail Blazers|Jazz|Nuggets|Suns|Kings|Clippers|Spurs|Mavericks|Rockets|Pelicans|Grizzlies|Yankees|Red Sox|Dodgers|Giants|Astros|Phillies|Braves|Mets|Cardinals|Cubs|Brewers|Reds|Pirates|Nationals|Marlins|Orioles|Blue Jays|Rays|White Sox|Guardians|Tigers|Royals|Twins|Angels|Athletics|Mariners|Rangers|Diamondbacks|Rockies|Padres)\b/i
   };
 
   const year = cleanedText.match(patterns.year)?.[0] || 'unknown';
@@ -299,6 +305,8 @@ function parseWithRegexFallback(text: string): ExtractedCardKeywords {
   const cardNumber = cleanedText.match(patterns.cardNumber)?.[1] || 'unknown';
   const gradeMatch = cleanedText.match(patterns.grade);
   const grade = gradeMatch ? `${gradeMatch[1]} ${gradeMatch[2]}` : undefined;
+  const teamMatch = cleanedText.match(patterns.team);
+  const team = teamMatch?.[0] || undefined;
   
   const parallels = [...cleanedText.matchAll(patterns.parallels)].map(m => m[0]).filter((v, i, a) => a.indexOf(v) === i);
   const specialAttributes = [...cleanedText.matchAll(patterns.specialAttributes)].map(m => m[0]).filter((v, i, a) => a.indexOf(v) === i);
@@ -313,11 +321,13 @@ function parseWithRegexFallback(text: string): ExtractedCardKeywords {
   }
 
   const extractedFields = [year, player, set, cardNumber, sport].filter(f => f !== 'unknown');
-  const confidence = Math.min(0.8, 0.2 + (extractedFields.length / 5) * 0.6);
+  const confidence = Math.min(0.85, 0.2 + (extractedFields.length / 5) * 0.5 + (parallels.length * 0.02) + (specialAttributes.length * 0.03));
+
+  console.log('ENHANCED: Regex extraction complete with enriched keywords');
 
   return {
     player,
-    team: undefined,
+    team,
     year,
     set,
     cardNumber,
@@ -331,7 +341,7 @@ function parseWithRegexFallback(text: string): ExtractedCardKeywords {
 }
 
 export async function parseCardDescription(description: string): Promise<ExtractedCardKeywords> {
-  console.log('Processing text description for keyword extraction');
+  console.log('ENHANCED: Processing text description for comprehensive keyword extraction');
   
   try {
     const cleanedDescription = description
@@ -345,16 +355,16 @@ export async function parseCardDescription(description: string): Promise<Extract
 
     if (config.openaiApiKey) {
       try {
-        return await extractKeywordsFromText(cleanedDescription);
+        return await extractStructuredKeywords(cleanedDescription);
       } catch (error) {
-        console.warn('AI parsing failed, falling back to regex:', error);
+        console.warn('ENHANCED: AI parsing failed, using enhanced regex:', error);
       }
     }
 
-    return parseWithRegexFallback(cleanedDescription);
+    return enhancedRegexExtraction(cleanedDescription);
     
   } catch (error) {
-    console.error('Description parsing failed:', error);
+    console.error('ENHANCED: Description parsing failed:', error);
     
     if (error instanceof ValidationError) {
       throw error;

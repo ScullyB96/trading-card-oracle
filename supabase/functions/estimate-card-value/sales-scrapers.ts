@@ -1,3 +1,4 @@
+
 import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
 import { fetch130PointComps } from './scrapers/130point-scraper.ts';
 import { combineAndNormalizeResults, NormalizedComp } from './scrapers/normalizer.ts';

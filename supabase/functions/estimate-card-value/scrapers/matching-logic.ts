@@ -1,3 +1,4 @@
+
 import { NormalizedComp } from './normalizer.ts';
 
 export interface SearchQuery {
