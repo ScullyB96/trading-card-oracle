@@ -2,6 +2,9 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
+import { extractCardInfoFromImage, parseCardDescription, ExtractedCardInfo } from './vision-parser.ts';
+import { fetchRealSalesData, SalesResult, SearchQuery } from './sales-scrapers.ts';
+import { calculateEstimatedValue, validatePriceConsistency, CalculationResult } from './value-calculator.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -14,44 +17,26 @@ const supabase = createClient(
 );
 
 interface EstimationRequest {
-  image?: string; // base64 encoded image
+  image?: string;
   description?: string;
   sources: string[];
   compLogic: string;
 }
 
-interface SalesResult {
-  id: string;
-  title: string;
-  price: number;
-  date: string;
-  source: string;
-  url: string;
-  thumbnail?: string;
-  selected: boolean;
-  type?: string; // auction, buy-it-now, etc.
-}
-
-interface ParsedCardInfo {
-  player: string;
-  year: string;
-  set: string;
-  cardNumber: string;
-  type: string;
-  grade?: string;
-  sport: string;
-  rawDescription: string;
-}
-
 interface EstimationResponse {
   success: boolean;
-  cardInfo?: ParsedCardInfo;
+  cardInfo?: ExtractedCardInfo;
   salesResults?: SalesResult[];
   estimatedValue?: number;
+  confidence?: number;
+  methodology?: string;
+  dataPoints?: number;
+  priceRange?: { low: number; high: number };
   logicUsed?: string;
   warnings?: string[];
   error?: string;
   details?: string;
+  traceId?: string;
 }
 
 serve(async (req) => {
@@ -59,212 +44,162 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const startTime = Date.now();
+  
   try {
-    console.log('=== EDGE FUNCTION START ===');
+    console.log('=== PRODUCTION CARD ESTIMATION START ===');
     console.log('Request method:', req.method);
-    console.log('Request headers:', Object.fromEntries(req.headers.entries()));
 
     const requestData: EstimationRequest = await req.json();
     console.log('=== RECEIVED PAYLOAD ===');
-    console.log('Full payload:', {
+    console.log('Payload summary:', {
       hasImage: !!requestData.image,
       hasDescription: !!requestData.description,
       descriptionLength: requestData.description?.length || 0,
       sources: requestData.sources,
       compLogic: requestData.compLogic,
-      imageLength: requestData.image?.length || 0
+      imageDataLength: requestData.image?.length || 0
     });
 
-    // Validate required fields
+    // Input validation
     if (!requestData.sources || requestData.sources.length === 0) {
-      console.error('No sources provided');
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'No data sources selected',
-          details: 'Please select at least one data source'
-        }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
+      return errorResponse('No data sources selected', 'Please select at least one data source', 400);
     }
 
     if (!requestData.image && !requestData.description?.trim()) {
-      console.error('No input provided - neither image nor description');
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'No input provided',
-          details: 'Please provide either an image or a card description'
-        }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
+      return errorResponse('No input provided', 'Please provide either an image or a card description', 400);
     }
 
-    let cardInfo = '';
     const warnings: string[] = [];
+    let cardInfo: ExtractedCardInfo;
 
-    // Step 1: Extract card information
-    if (requestData.image) {
-      console.log('=== PROCESSING IMAGE ===');
-      try {
-        cardInfo = await extractTextFromImage(requestData.image);
-        console.log('Extracted text:', cardInfo);
-      } catch (error) {
-        console.error('Image processing failed:', error);
-        warnings.push(`Image processing failed: ${error.message}`);
-        
-        // Check for specific Google Vision API errors
-        if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
-          return new Response(
-            JSON.stringify({
-              success: false,
-              error: 'Google Vision API billing not enabled',
-              details: 'The Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project or use the "Describe Card" tab instead.',
-              suggestion: 'Switch to the "Describe Card" tab to continue without image processing.',
-              traceId: 'billing-disabled'
-            }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-            }
-          );
-        }
-
-        if (error.message.includes('Cloud Vision API has not been used') || error.message.includes('SERVICE_DISABLED')) {
-          return new Response(
-            JSON.stringify({
-              success: false,
-              error: 'Google Vision API not enabled',
-              details: 'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it or use the card description option instead.',
-              suggestion: 'Try using the "Describe Card" tab instead of uploading an image.',
-              traceId: 'vision-api-disabled'
-            }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-            }
-          );
-        }
-        
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Image processing failed',
-            details: error.message,
-            suggestion: 'Try using the "Describe Card" tab instead of uploading an image.',
-            traceId: 'image-processing-error'
-          }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          }
-        );
-      }
-    } else if (requestData.description?.trim()) {
-      console.log('=== USING DESCRIPTION ===');
-      cardInfo = requestData.description.trim();
-      console.log('Card description:', cardInfo);
-    }
-
-    // Step 2: Parse and enhance card information using OpenAI
-    console.log('=== PARSING CARD INFO ===');
-    let parsedCardInfo: ParsedCardInfo;
+    // STEP 1: Extract/Parse Card Information
+    console.log('=== STEP 1: CARD INFORMATION EXTRACTION ===');
     try {
-      parsedCardInfo = await parseCardInformation(cardInfo);
-      console.log('Parsed card info:', parsedCardInfo);
+      if (requestData.image) {
+        console.log('Processing image with Vision API');
+        cardInfo = await extractCardInfoFromImage(requestData.image);
+        console.log('Extracted card info:', cardInfo);
+        
+        if (cardInfo.confidence < 0.6) {
+          warnings.push(`Low confidence in image parsing (${Math.round(cardInfo.confidence * 100)}%). Results may be less accurate.`);
+        }
+      } else {
+        console.log('Processing text description');
+        cardInfo = await parseCardDescription(requestData.description!.trim());
+        console.log('Parsed card info:', cardInfo);
+      }
+      
+      if (!cardInfo.player || cardInfo.player === 'Unknown') {
+        return errorResponse('Could not identify player', 'Unable to extract player name from input. Please try a clearer image or more detailed description.', 400);
+      }
+      
     } catch (error) {
       console.error('Card parsing failed:', error);
-      warnings.push(`Card parsing failed: ${error.message}`);
+      return handleParsingError(error);
+    }
+
+    // STEP 2: Fetch Real Sales Data
+    console.log('=== STEP 2: REAL SALES DATA FETCH ===');
+    let salesResults: SalesResult[];
+    
+    try {
+      const searchQuery: SearchQuery = {
+        player: cardInfo.player,
+        year: cardInfo.year,
+        set: cardInfo.set,
+        cardNumber: cardInfo.cardNumber,
+        grade: cardInfo.grade,
+        sport: cardInfo.sport
+      };
       
-      // Check for OpenAI quota errors
-      if (error.message.includes('insufficient_quota') || error.message.includes('exceeded your current quota')) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'OpenAI API quota exceeded',
-            details: 'The OpenAI API quota has been exceeded. Please check your OpenAI account billing and usage limits.',
-            suggestion: 'You can still use the app by providing a detailed card description instead of relying on AI parsing.',
-            traceId: 'openai-quota-exceeded'
-          }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          }
-        );
+      console.log('Search query:', searchQuery);
+      
+      salesResults = await fetchRealSalesData(searchQuery, requestData.sources);
+      console.log(`Found ${salesResults.length} total sales results`);
+      
+      if (salesResults.length === 0) {
+        // Try broader search without card number or grade
+        console.log('No exact matches, trying broader search...');
+        const broaderQuery = {
+          ...searchQuery,
+          cardNumber: '',
+          grade: undefined
+        };
+        
+        salesResults = await fetchRealSalesData(broaderQuery, requestData.sources);
+        
+        if (salesResults.length > 0) {
+          warnings.push(`No exact matches found. Showing ${salesResults.length} similar cards. Results may be less accurate.`);
+        } else {
+          warnings.push('No sales data found for this card. This may be a rare or recently released card.');
+        }
       }
       
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'Card information parsing failed',
-          details: error.message,
-          traceId: 'card-parsing-error'
-        }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
-    }
-
-    // Step 3: Search for comparable sales
-    console.log('=== SEARCHING SALES ===');
-    let salesResults: SalesResult[];
-    try {
-      salesResults = await searchComparableSales(parsedCardInfo, requestData.sources);
-      console.log('Found sales results:', salesResults.length);
     } catch (error) {
-      console.error('Sales search failed:', error);
-      warnings.push(`Sales search failed: ${error.message}`);
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'Sales data search failed',
-          details: error.message,
-          traceId: 'sales-search-error'
-        }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
+      console.error('Sales data fetch failed:', error);
+      return errorResponse('Sales data fetch failed', error.message, 500, 'sales-fetch-error');
     }
 
-    // Step 4: Calculate estimated value
-    console.log('=== CALCULATING VALUE ===');
-    let estimatedValue: number;
+    // STEP 3: Calculate Estimated Value
+    console.log('=== STEP 3: VALUE CALCULATION ===');
+    let calculationResult: CalculationResult;
+    
     try {
-      estimatedValue = calculateEstimatedValue(salesResults, requestData.compLogic);
-      console.log('Calculated value:', estimatedValue);
+      // Mark all results as selected by default
+      const salesWithSelection = salesResults.map(result => ({
+        ...result,
+        selected: true
+      }));
+      
+      calculationResult = calculateEstimatedValue(
+        salesWithSelection,
+        requestData.compLogic,
+        cardInfo.confidence
+      );
+      
+      console.log('Calculation result:', calculationResult);
+      
+      // Add price consistency warnings
+      const consistencyWarnings = validatePriceConsistency(salesWithSelection);
+      warnings.push(...consistencyWarnings);
+      
     } catch (error) {
       console.error('Value calculation failed:', error);
-      warnings.push(`Value calculation failed: ${error.message}`);
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'Value calculation failed',
-          details: error.message,
-          traceId: 'value-calculation-error'
-        }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
+      return errorResponse('Value calculation failed', error.message, 500, 'calculation-error');
     }
 
-    console.log('=== SUCCESS ===');
+    // STEP 4: Final Quality Checks
+    console.log('=== STEP 4: QUALITY VALIDATION ===');
+    
+    // Check for very low match scores
+    const avgMatchScore = salesResults.reduce((sum, r) => sum + (r.matchScore || 0), 0) / Math.max(1, salesResults.length);
+    if (avgMatchScore < 0.3) {
+      warnings.push('Low similarity between search and found results. Consider refining your search.');
+    }
+    
+    // Check for stale data
+    const recentSales = salesResults.filter(r => {
+      const daysSince = (Date.now() - new Date(r.date).getTime()) / (1000 * 60 * 60 * 24);
+      return daysSince <= 90;
+    });
+    
+    if (recentSales.length < salesResults.length / 2) {
+      warnings.push('Many results are from older sales. Current market value may differ.');
+    }
+
+    const processingTime = Date.now() - startTime;
+    console.log(`=== PROCESSING COMPLETE in ${processingTime}ms ===`);
+
     const response: EstimationResponse = {
       success: true,
-      cardInfo: parsedCardInfo,
-      salesResults,
-      estimatedValue,
+      cardInfo,
+      salesResults: salesResults.map(r => ({ ...r, selected: true })),
+      estimatedValue: calculationResult.estimatedValue,
+      confidence: calculationResult.confidence,
+      methodology: calculationResult.methodology,
+      dataPoints: calculationResult.dataPoints,
+      priceRange: calculationResult.priceRange,
       logicUsed: requestData.compLogic,
       warnings: warnings.length > 0 ? warnings : undefined
     };
@@ -282,361 +217,57 @@ serve(async (req) => {
     console.error('Error message:', error.message);
     console.error('Error stack:', error.stack);
     
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: 'An unexpected error occurred',
-        details: error.message,
-        traceId: 'unhandled-error'
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      }
-    );
+    return errorResponse('Unexpected error occurred', error.message, 500, 'unhandled-error');
   }
 });
 
-async function extractTextFromImage(base64Image: string): Promise<string> {
-  console.log('=== EXTRACT TEXT FROM IMAGE ===');
-  
-  // Try multiple possible environment variable names for Google API key
-  const googleApiKey = Deno.env.get('GOOGLE_API_KEY') || 
-                      Deno.env.get('Google API Key') || 
-                      Deno.env.get('GOOGLE_CLOUD_API_KEY');
-  
-  console.log('Available env vars:', Object.keys(Deno.env.toObject()));
-  console.log('Google API key found:', !!googleApiKey);
-  
-  if (!googleApiKey) {
-    throw new Error('Google API key not found in environment variables. Please set the "Google API Key" secret in your Supabase project settings.');
-  }
+function errorResponse(error: string, details: string, status: number, traceId?: string): Response {
+  return new Response(
+    JSON.stringify({
+      success: false,
+      error,
+      details,
+      traceId
+    }),
+    {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    }
+  );
+}
 
-  try {
-    // Remove data URL prefix if present
-    const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
-    console.log('Image data length after cleanup:', imageData.length);
-
-    const response = await fetch(
-      `https://vision.googleapis.com/v1/images:annotate?key=${googleApiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          requests: [
-            {
-              image: {
-                content: imageData
-              },
-              features: [
-                {
-                  type: 'TEXT_DETECTION',
-                  maxResults: 10
-                }
-              ]
-            }
-          ]
-        })
-      }
+function handleParsingError(error: any): Response {
+  if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
+    return errorResponse(
+      'Google Vision API billing not enabled',
+      'The Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project or use the "Describe Card" tab instead.',
+      400,
+      'billing-disabled'
     );
-
-    console.log('Google Vision API response status:', response.status);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Google Vision API error response:', errorText);
-      
-      // Parse the error to provide more specific messages
-      try {
-        const errorData = JSON.parse(errorText);
-        if (errorData.error?.details) {
-          // Check for billing disabled error
-          const billingDisabled = errorData.error.details.some((detail: any) => 
-            detail.reason === 'BILLING_DISABLED'
-          );
-          if (billingDisabled) {
-            throw new Error('BILLING_DISABLED: Google Vision API requires billing to be enabled on your Google Cloud project.');
-          }
-        }
-        
-        if (errorData.error?.message?.includes('Cloud Vision API has not been used')) {
-          throw new Error('SERVICE_DISABLED: Cloud Vision API has not been used in project before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/vision.googleapis.com/overview then retry.');
-        }
-        
-        throw new Error(`Google Vision API error: ${errorData.error?.message || errorText}`);
-      } catch (parseError) {
-        // If we can't parse the error, use the original message
-        throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
-      }
-    }
-
-    const data = await response.json();
-    console.log('Google Vision API response data keys:', Object.keys(data));
-    
-    if (data.responses?.[0]?.textAnnotations?.[0]?.description) {
-      return data.responses[0].textAnnotations[0].description;
-    }
-    
-    if (data.responses?.[0]?.error) {
-      throw new Error(`Google Vision API error: ${data.responses[0].error.message}`);
-    }
-    
-    throw new Error('No text detected in image');
-  } catch (error) {
-    console.error('Vision API request failed:', error);
-    throw error;
-  }
-}
-
-async function parseCardInformation(rawText: string): Promise<ParsedCardInfo> {
-  console.log('=== PARSE CARD INFORMATION ===');
-  
-  // Try multiple possible environment variable names for OpenAI API key
-  const openaiApiKey = Deno.env.get('OPENAI_API_KEY') || 
-                       Deno.env.get('OPEN AI KEY') || 
-                       Deno.env.get('OPENAI_KEY');
-  
-  console.log('OpenAI API key found:', !!openaiApiKey);
-  
-  if (!openaiApiKey) {
-    throw new Error('OpenAI API key not found in environment variables');
   }
 
-  try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${openaiApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert trading card analyzer. Parse the following text and extract key information about the trading card. Return ONLY a valid JSON object with these exact fields:
-            {
-              "player": "Player name",
-              "year": "Year of the card",
-              "set": "Brand/Set name",
-              "cardNumber": "Card number",
-              "type": "Type (rookie, parallel, base, etc.)",
-              "grade": "Condition/grade if mentioned, otherwise null",
-              "sport": "Sport (basketball, football, baseball, hockey, etc.)",
-              "rawDescription": "Clean, searchable description for finding comparable sales"
-            }
-            
-            Be precise with field extraction. If a field cannot be determined, use "Unknown" for strings or null for optional fields.`
-          },
-          {
-            role: 'user',
-            content: rawText
-          }
-        ],
-        temperature: 0.1,
-        max_tokens: 300
-      }),
-    });
-
-    console.log('OpenAI API response status:', response.status);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('OpenAI API error response:', errorText);
-      
-      // Parse the error to provide more specific messages
-      try {
-        const errorData = JSON.parse(errorText);
-        if (errorData.error?.type === 'insufficient_quota') {
-          throw new Error(`insufficient_quota: ${errorData.error.message}`);
-        }
-        throw new Error(`OpenAI API error: ${errorData.error?.message || errorText}`);
-      } catch (parseError) {
-        throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
-      }
-    }
-
-    const data = await response.json();
-    console.log('OpenAI API response data keys:', Object.keys(data));
-    
-    if (data.choices?.[0]?.message?.content) {
-      const content = data.choices[0].message.content.trim();
-      console.log('OpenAI raw response:', content);
-      
-      try {
-        const parsedInfo = JSON.parse(content);
-        return parsedInfo as ParsedCardInfo;
-      } catch (parseError) {
-        console.error('Failed to parse JSON from OpenAI:', parseError);
-        throw new Error('Failed to parse structured card information from AI response');
-      }
-    }
-    
-    throw new Error('Failed to parse card information - no content in response');
-  } catch (error) {
-    console.error('OpenAI API request failed:', error);
-    throw error;
-  }
-}
-
-async function searchComparableSales(cardInfo: ParsedCardInfo, sources: string[]): Promise<SalesResult[]> {
-  console.log('=== SEARCH COMPARABLE SALES ===');
-  console.log(`Searching for: ${cardInfo.rawDescription} across sources: ${sources.join(', ')}`);
-  
-  // This is a mock implementation. In a real app, you would integrate with actual APIs
-  // from eBay, 130point, Goldin, and PWCC
-  
-  const mockResults: SalesResult[] = [];
-  let idCounter = 1;
-
-  try {
-    if (sources.includes('ebay')) {
-      // Generate 2-3 eBay results
-      const numResults = Math.floor(Math.random() * 2) + 2;
-      for (let i = 0; i < numResults; i++) {
-        mockResults.push({
-          id: (idCounter++).toString(),
-          title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} #${cardInfo.cardNumber} ${cardInfo.type}`,
-          price: Math.floor(Math.random() * 300) + 50,
-          date: new Date(Date.now() - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          source: 'eBay',
-          url: `https://ebay.com/itm/${Math.floor(Math.random() * 1000000000)}`,
-          type: i === 0 ? 'auction' : 'buy-it-now',
-          selected: true
-        });
-      }
-    }
-
-    if (sources.includes('130point')) {
-      mockResults.push({
-        id: (idCounter++).toString(),
-        title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} Card #${cardInfo.cardNumber}`,
-        price: Math.floor(Math.random() * 250) + 75,
-        date: new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        source: '130point',
-        url: `https://130point.com/sales/${Math.floor(Math.random() * 100000)}`,
-        type: 'auction',
-        selected: true
-      });
-    }
-
-    if (sources.includes('goldin')) {
-      mockResults.push({
-        id: (idCounter++).toString(),
-        title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} #${cardInfo.cardNumber} ${cardInfo.grade || ''}`.trim(),
-        price: Math.floor(Math.random() * 400) + 100,
-        date: new Date(Date.now() - Math.random() * 120 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        source: 'Goldin',
-        url: `https://goldin.co/lot/${Math.floor(Math.random() * 100000)}`,
-        type: 'auction',
-        selected: true
-      });
-    }
-
-    if (sources.includes('pwcc')) {
-      mockResults.push({
-        id: (idCounter++).toString(),
-        title: `${cardInfo.player} ${cardInfo.year} ${cardInfo.set} Card #${cardInfo.cardNumber}`,
-        price: Math.floor(Math.random() * 280) + 60,
-        date: new Date(Date.now() - Math.random() * 75 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        source: 'PWCC',
-        url: `https://pwccmarketplace.com/lot/${Math.floor(Math.random() * 100000)}`,
-        type: 'marketplace',
-        selected: true
-      });
-    }
-
-    console.log(`Generated ${mockResults.length} mock sales results`);
-    return mockResults;
-  } catch (error) {
-    console.error('Error generating mock sales data:', error);
-    throw error;
-  }
-}
-
-function calculateEstimatedValue(salesResults: SalesResult[], compLogic: string): number {
-  console.log('=== CALCULATE ESTIMATED VALUE ===');
-  console.log(`Calculation logic: ${compLogic}`);
-  
-  const selectedResults = salesResults.filter(r => r.selected);
-  console.log(`Selected results: ${selectedResults.length}`);
-  
-  if (selectedResults.length === 0) {
-    console.log('No selected results, returning 0');
-    return 0;
+  if (error.message.includes('Cloud Vision API has not been used') || error.message.includes('SERVICE_DISABLED')) {
+    return errorResponse(
+      'Google Vision API not enabled',
+      'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it or use the card description option instead.',
+      400,
+      'vision-api-disabled'
+    );
   }
 
-  const prices = selectedResults.map(r => r.price).sort((a, b) => a - b);
-  console.log('Sorted prices:', prices);
-  
-  let result = 0;
-  
-  try {
-    switch (compLogic) {
-      case 'lastSale':
-        // Take the most recent sale (first in the array since they're sorted by date desc)
-        result = selectedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0].price;
-        break;
-      
-      case 'average3':
-        // Take average of up to 3 most recent sales
-        const recent3 = selectedResults
-          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-          .slice(0, 3)
-          .map(r => r.price);
-        result = Math.round((recent3.reduce((sum, price) => sum + price, 0) / recent3.length) * 100) / 100;
-        break;
-      
-      case 'average5':
-        // Take average of up to 5 most recent sales
-        const recent5 = selectedResults
-          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-          .slice(0, 5)
-          .map(r => r.price);
-        result = Math.round((recent5.reduce((sum, price) => sum + price, 0) / recent5.length) * 100) / 100;
-        break;
-      
-      case 'median':
-        const mid = Math.floor(prices.length / 2);
-        result = prices.length % 2 === 0 
-          ? Math.round(((prices[mid - 1] + prices[mid]) / 2) * 100) / 100
-          : prices[mid];
-        break;
-      
-      case 'mode':
-        // Find most common price range (within $20)
-        const ranges: { [key: string]: number[] } = {};
-        prices.forEach(price => {
-          const range = Math.floor(price / 20) * 20;
-          if (!ranges[range]) ranges[range] = [];
-          ranges[range].push(price);
-        });
-        
-        const mostCommonRange = Object.values(ranges).reduce((max, current) => 
-          current.length > max.length ? current : max
-        );
-        
-        result = Math.round((mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length) * 100) / 100;
-        break;
-      
-      case 'conservative':
-        // Take 25th percentile
-        const index = Math.floor(prices.length * 0.25);
-        result = prices[index];
-        break;
-      
-      default:
-        // Default to average of all selected results
-        result = Math.round((prices.reduce((sum, price) => sum + price, 0) / prices.length) * 100) / 100;
-        break;
-    }
-    
-    console.log(`Calculated value using ${compLogic}: ${result}`);
-    return result;
-  } catch (error) {
-    console.error('Error in value calculation:', error);
-    throw error;
+  if (error.message.includes('insufficient_quota') || error.message.includes('exceeded your current quota')) {
+    return errorResponse(
+      'OpenAI API quota exceeded',
+      'The OpenAI API quota has been exceeded. Please check your OpenAI account billing and usage limits.',
+      400,
+      'openai-quota-exceeded'
+    );
   }
+
+  return errorResponse(
+    'Card information parsing failed',
+    error.message,
+    500,
+    'parsing-error'
+  );
 }
