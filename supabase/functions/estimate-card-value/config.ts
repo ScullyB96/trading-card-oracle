@@ -61,16 +61,22 @@ export function loadConfiguration(): AppConfig {
     throw new ConfigurationError('Missing required Supabase configuration');
   }
 
-  // Log warnings for missing optional configs instead of throwing errors
-  if (!config.googleVisionApiKey) {
+  // Log confirmation for successful configurations instead of warnings
+  if (config.googleVisionApiKey) {
+    console.log('✅ Google Vision API configured successfully');
+  } else {
     console.warn('Google Vision API key not configured - image processing will be disabled');
   }
   
-  if (!config.openaiApiKey) {
+  if (config.openaiApiKey) {
+    console.log('✅ OpenAI API configured successfully');
+  } else {
     console.warn('OpenAI API key not configured - AI features may be limited');
   }
 
-  if (!config.googleSearchApiKey) {
+  if (config.googleSearchApiKey) {
+    console.log('✅ Google Search API configured successfully - enhanced discovery enabled');
+  } else {
     console.warn('Google Search API key not configured - search-driven discovery will be disabled');
   }
 
