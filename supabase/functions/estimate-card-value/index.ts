@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { corsHeaders } from './config.ts'; // Import centralized headers
+import { corsHeaders } from './config.ts';
 import { Logger } from './logger.ts';
-import { parseCardFromImage, parseCardFromDescription } from './card-parser.ts';
+import { extractCardInfoFromImage, parseCardDescription } from './vision-parser.ts';
 import { CardEstimationError, handleError } from './errors.ts';
 import { fetchProductionComps } from './sales-scrapers.ts';
 
@@ -13,9 +13,9 @@ interface EstimationRequest {
 }
 
 serve(async (req) => {
-  // **IMPROVED CORS HANDLING**
-  // Handle CORS preflight requests by returning a 204 No Content response.
-  // This is a standard and robust way to handle preflight checks.
+  // **DEFINITIVE CORS PREFLIGHT FIX**
+  // This block handles the browser's preflight request. It must return a 2xx
+  // status (204 is best) with the correct headers for the browser to proceed.
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders, status: 204 });
   }
@@ -27,46 +27,32 @@ serve(async (req) => {
     const requestBody: EstimationRequest = await req.json();
     traceId = `est_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    logger.info('Card estimation request received', {
-      operation: 'estimate-card-value',
-      traceId,
-      sources: requestBody.sources,
-      compLogic: requestBody.compLogic,
-      hasImage: !!requestBody.image,
-      hasDescription: !!requestBody.description
-    });
+    logger.info('Card estimation request received', { operation: 'estimate-card-value', traceId });
 
     if (!requestBody.image && !requestBody.description) {
-      throw new CardEstimationError('Either image or description is required', 'INVALID_INPUT', traceId);
-    }
-
-    if (!requestBody.sources || requestBody.sources.length === 0) {
-      throw new CardEstimationError('At least one source is required', 'INVALID_INPUT', traceId);
+      throw new CardEstimationError('Either image or description is required.', 'INVALID_INPUT', traceId);
     }
 
     let cardKeywords;
+    // Prioritize text description as it's more reliable than image parsing.
     if (requestBody.description) {
-        logger.info('Parsing card from description', { operation: 'parseCardFromDescription', traceId });
-        cardKeywords = await parseCardFromDescription(requestBody.description, logger);
+        logger.info('Parsing card from description', { traceId });
+        cardKeywords = await parseCardDescription(requestBody.description);
     } else if (requestBody.image) {
-        logger.info('Parsing card from image', { operation: 'parseCardFromImage', traceId });
-        cardKeywords = await parseCardFromImage(requestBody.image, logger);
+        logger.info('Parsing card from image', { traceId });
+        cardKeywords = await extractCardInfoFromImage(requestBody.image);
     } else {
         throw new CardEstimationError('No input provided.', 'INVALID_INPUT', traceId);
     }
 
-    logger.info('Card parsing complete', {
-      operation: 'parseCard',
-      traceId,
-      player: cardKeywords.player,
-      year: cardKeywords.year,
-      set: cardKeywords.set
-    });
+    logger.info('Card parsing complete', { traceId, player: cardKeywords.player });
     
+    // Call the single, robust function to get results.
+    // Note: The `sources` parameter is no longer needed here as the new architecture only uses eBay's API.
     const productionResult = await fetchProductionComps(
       cardKeywords,
-      requestBody.sources,
-      requestBody.compLogic
+      requestBody.compLogic,
+      logger
     );
 
     const response = {
@@ -76,20 +62,16 @@ serve(async (req) => {
       ...productionResult
     };
 
-    logger.info('Card estimation complete', {
-      operation: 'estimate-card-value',
-      traceId,
-      estimatedValue: productionResult.estimatedValue,
-      compsFound: productionResult.comps.length,
-      success: true
-    });
+    logger.info('Card estimation complete', { traceId, success: true });
 
+    // Return the final success response with correct CORS headers.
     return new Response(JSON.stringify(response), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200
     });
 
   } catch (error: any) {
+    // The centralized error handler will apply the correct CORS headers to the error response.
     return handleError(error, traceId, logger);
   }
 });

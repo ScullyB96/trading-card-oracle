@@ -1,6 +1,6 @@
 import { corsHeaders } from './config.ts'; // Import centralized headers
 
-// Custom error classes for better error handling and debugging
+// A simpler, more focused set of custom errors for the new architecture.
 export class CardProcessingError extends Error {
   constructor(public message: string, public code: string, public statusCode: number = 500) {
     super(message);
@@ -15,80 +15,39 @@ export class CardEstimationError extends CardProcessingError {
   }
 }
 
-export class ImageParsingError extends CardProcessingError {
-  constructor(message: string, public details?: any) {
-    super(message, 'IMAGE_PARSING_ERROR', 400);
-    this.name = 'ImageParsingError';
-  }
-}
-
-export class ScrapingError extends CardProcessingError {
-  constructor(message: string, public source: string, public details?: any) {
-    super(message, 'SCRAPING_ERROR', 500);
-    this.name = 'ScrapingError';
-  }
-}
-
-export class ValidationError extends CardProcessingError {
-  constructor(message: string, public field: string) {
-    super(message, 'VALIDATION_ERROR', 400);
-    this.name = 'ValidationError';
-  }
-}
-
 export class ConfigurationError extends CardProcessingError {
-  constructor(message: string) {
-    super(message, 'CONFIGURATION_ERROR', 500);
-    this.name = 'ConfigurationError';
-  }
+    constructor(message: string) {
+      super(message, 'CONFIGURATION_ERROR', 500);
+      this.name = 'ConfigurationError';
+    }
 }
 
-export class TimeoutError extends CardProcessingError {
-  constructor(message: string, public operation: string) {
-    super(message, 'TIMEOUT_ERROR', 408);
-    this.name = 'TimeoutError';
-  }
-}
-
+// Centralized error handler to ensure all responses are CORS-compliant.
 export function handleError(error: any, traceId: string, logger?: any) {
-  // This function now uses the centralized corsHeaders from config.ts
-
   if (logger) {
     logger.error('Request failed', error, { traceId });
   }
 
-  if (error instanceof CardEstimationError) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message,
-      code: error.code,
-      traceId: error.traceId || traceId
-    }), {
-      status: error.statusCode,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
-
-  if (error instanceof CardProcessingError) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message,
-      code: error.code,
-      traceId
-    }), {
-      status: error.statusCode,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
-
-  // Handle generic errors
-  return new Response(JSON.stringify({
+  let statusCode = 500;
+  let responseBody = {
     success: false,
     error: 'Internal server error',
     code: 'INTERNAL_ERROR',
     traceId
-  }), {
-    status: 500,
+  };
+
+  if (error instanceof CardProcessingError) {
+    statusCode = error.statusCode;
+    responseBody = {
+      success: false,
+      error: error.message,
+      code: error.code,
+      traceId
+    };
+  }
+
+  return new Response(JSON.stringify(responseBody), {
+    status: statusCode,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
 }
