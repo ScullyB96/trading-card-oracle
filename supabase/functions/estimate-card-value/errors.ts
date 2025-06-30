@@ -1,4 +1,4 @@
-import { corsHeaders } from './config.ts'; // Import centralized headers
+import { corsHeaders } from './config.ts'; // This import is now safe.
 
 // A simpler, more focused set of custom errors for the new architecture.
 export class CardProcessingError extends Error {
@@ -13,13 +13,6 @@ export class CardEstimationError extends CardProcessingError {
     super(message, code, 400);
     this.name = 'CardEstimationError';
   }
-}
-
-export class ConfigurationError extends CardProcessingError {
-    constructor(message: string) {
-      super(message, 'CONFIGURATION_ERROR', 500);
-      this.name = 'ConfigurationError';
-    }
 }
 
 // Centralized error handler to ensure all responses are CORS-compliant.
