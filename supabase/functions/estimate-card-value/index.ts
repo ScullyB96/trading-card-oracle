@@ -37,35 +37,148 @@ serve(async (req) => {
   }
 
   try {
+    console.log('=== EDGE FUNCTION START ===');
+    console.log('Request method:', req.method);
+    console.log('Request headers:', Object.fromEntries(req.headers.entries()));
+
     const requestData: EstimationRequest = await req.json();
-    console.log('Processing estimation request:', {
+    console.log('=== RECEIVED PAYLOAD ===');
+    console.log('Full payload:', {
       hasImage: !!requestData.image,
       hasDescription: !!requestData.description,
+      descriptionLength: requestData.description?.length || 0,
       sources: requestData.sources,
-      compLogic: requestData.compLogic
+      compLogic: requestData.compLogic,
+      imageLength: requestData.image?.length || 0
     });
+
+    // Validate required fields
+    if (!requestData.sources || requestData.sources.length === 0) {
+      console.error('No sources provided');
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'No data sources selected',
+          details: 'Please select at least one data source'
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    if (!requestData.image && !requestData.description?.trim()) {
+      console.error('No input provided - neither image nor description');
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'No input provided',
+          details: 'Please provide either an image or a card description'
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
 
     let cardInfo = '';
 
     // Step 1: Extract card information
     if (requestData.image) {
-      console.log('Processing image with Google Vision API...');
-      cardInfo = await extractTextFromImage(requestData.image);
-    } else if (requestData.description) {
-      cardInfo = requestData.description;
+      console.log('=== PROCESSING IMAGE ===');
+      try {
+        cardInfo = await extractTextFromImage(requestData.image);
+        console.log('Extracted text:', cardInfo);
+      } catch (error) {
+        console.error('Image processing failed:', error);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'Image processing failed',
+            details: error.message,
+            traceId: 'image-processing-error'
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
+      }
+    } else if (requestData.description?.trim()) {
+      console.log('=== USING DESCRIPTION ===');
+      cardInfo = requestData.description.trim();
+      console.log('Card description:', cardInfo);
     }
 
     // Step 2: Parse and enhance card information using OpenAI
-    console.log('Parsing card information with OpenAI...');
-    const parsedCardInfo = await parseCardInformation(cardInfo);
+    console.log('=== PARSING CARD INFO ===');
+    let parsedCardInfo;
+    try {
+      parsedCardInfo = await parseCardInformation(cardInfo);
+      console.log('Parsed card info:', parsedCardInfo);
+    } catch (error) {
+      console.error('Card parsing failed:', error);
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Card information parsing failed',
+          details: error.message,
+          traceId: 'card-parsing-error'
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
 
     // Step 3: Search for comparable sales
-    console.log('Searching for comparable sales...');
-    const salesResults = await searchComparableSales(parsedCardInfo, requestData.sources);
+    console.log('=== SEARCHING SALES ===');
+    let salesResults;
+    try {
+      salesResults = await searchComparableSales(parsedCardInfo, requestData.sources);
+      console.log('Found sales results:', salesResults.length);
+    } catch (error) {
+      console.error('Sales search failed:', error);
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Sales data search failed',
+          details: error.message,
+          traceId: 'sales-search-error'
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
 
     // Step 4: Calculate estimated value
-    const estimatedValue = calculateEstimatedValue(salesResults, requestData.compLogic);
+    console.log('=== CALCULATING VALUE ===');
+    let estimatedValue;
+    try {
+      estimatedValue = calculateEstimatedValue(salesResults, requestData.compLogic);
+      console.log('Calculated value:', estimatedValue);
+    } catch (error) {
+      console.error('Value calculation failed:', error);
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Value calculation failed',
+          details: error.message,
+          traceId: 'value-calculation-error'
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
 
+    console.log('=== SUCCESS ===');
     return new Response(
       JSON.stringify({
         success: true,
@@ -79,11 +192,17 @@ serve(async (req) => {
     );
 
   } catch (error) {
-    console.error('Error in estimate-card-value function:', error);
+    console.error('=== UNHANDLED ERROR ===');
+    console.error('Error type:', error.constructor.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
     return new Response(
       JSON.stringify({
         success: false,
-        error: error.message || 'An unexpected error occurred'
+        error: 'An unexpected error occurred',
+        details: error.message,
+        traceId: 'unhandled-error'
       }),
       {
         status: 500,
@@ -94,200 +213,277 @@ serve(async (req) => {
 });
 
 async function extractTextFromImage(base64Image: string): Promise<string> {
-  const googleApiKey = Deno.env.get('GOOGLE_API_KEY');
+  console.log('=== EXTRACT TEXT FROM IMAGE ===');
+  
+  // Try multiple possible environment variable names for Google API key
+  const googleApiKey = Deno.env.get('GOOGLE_API_KEY') || 
+                      Deno.env.get('Google API Key') || 
+                      Deno.env.get('GOOGLE_CLOUD_API_KEY');
+  
+  console.log('Available env vars:', Object.keys(Deno.env.toObject()));
+  console.log('Google API key found:', !!googleApiKey);
+  
   if (!googleApiKey) {
-    throw new Error('Google API key not found');
+    throw new Error('Google API key not found in environment variables');
   }
 
-  // Remove data URL prefix if present
-  const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
+  try {
+    // Remove data URL prefix if present
+    const imageData = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
+    console.log('Image data length after cleanup:', imageData.length);
 
-  const response = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${googleApiKey}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        requests: [
-          {
-            image: {
-              content: imageData
-            },
-            features: [
-              {
-                type: 'TEXT_DETECTION',
-                maxResults: 10
-              }
-            ]
-          }
-        ]
-      })
+    const response = await fetch(
+      `https://vision.googleapis.com/v1/images:annotate?key=${googleApiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          requests: [
+            {
+              image: {
+                content: imageData
+              },
+              features: [
+                {
+                  type: 'TEXT_DETECTION',
+                  maxResults: 10
+                }
+              ]
+            }
+          ]
+        })
+      }
+    );
+
+    console.log('Google Vision API response status:', response.status);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Google Vision API error response:', errorText);
+      throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
     }
-  );
 
-  const data = await response.json();
-  
-  if (data.responses?.[0]?.textAnnotations?.[0]?.description) {
-    return data.responses[0].textAnnotations[0].description;
+    const data = await response.json();
+    console.log('Google Vision API response:', JSON.stringify(data, null, 2));
+    
+    if (data.responses?.[0]?.textAnnotations?.[0]?.description) {
+      return data.responses[0].textAnnotations[0].description;
+    }
+    
+    if (data.responses?.[0]?.error) {
+      throw new Error(`Google Vision API error: ${data.responses[0].error.message}`);
+    }
+    
+    throw new Error('No text detected in image');
+  } catch (error) {
+    console.error('Vision API request failed:', error);
+    throw error;
   }
-  
-  throw new Error('No text detected in image');
 }
 
 async function parseCardInformation(rawText: string): Promise<string> {
-  const openaiApiKey = Deno.env.get('OPENAI_API_KEY');
+  console.log('=== PARSE CARD INFORMATION ===');
+  
+  // Try multiple possible environment variable names for OpenAI API key
+  const openaiApiKey = Deno.env.get('OPENAI_API_KEY') || 
+                       Deno.env.get('OPEN AI KEY') || 
+                       Deno.env.get('OPENAI_KEY');
+  
+  console.log('OpenAI API key found:', !!openaiApiKey);
+  
   if (!openaiApiKey) {
-    throw new Error('OpenAI API key not found');
+    throw new Error('OpenAI API key not found in environment variables');
   }
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${openaiApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: `You are an expert trading card analyzer. Parse the following text and extract key information about the trading card. Return a structured description that includes:
-          - Player name
-          - Year and brand/set
-          - Card number
-          - Type (rookie, parallel, base, etc.)
-          - Condition/grade if mentioned
-          - Sport
-          
-          Format the response as a clear, searchable description that would be useful for finding comparable sales.`
-        },
-        {
-          role: 'user',
-          content: rawText
-        }
-      ],
-      temperature: 0.3,
-      max_tokens: 500
-    }),
-  });
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openaiApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert trading card analyzer. Parse the following text and extract key information about the trading card. Return a structured description that includes:
+            - Player name
+            - Year and brand/set
+            - Card number
+            - Type (rookie, parallel, base, etc.)
+            - Condition/grade if mentioned
+            - Sport
+            
+            Format the response as a clear, searchable description that would be useful for finding comparable sales.`
+          },
+          {
+            role: 'user',
+            content: rawText
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 500
+      }),
+    });
 
-  const data = await response.json();
-  
-  if (data.choices?.[0]?.message?.content) {
-    return data.choices[0].message.content;
+    console.log('OpenAI API response status:', response.status);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenAI API error response:', errorText);
+      throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log('OpenAI API response:', JSON.stringify(data, null, 2));
+    
+    if (data.choices?.[0]?.message?.content) {
+      return data.choices[0].message.content;
+    }
+    
+    throw new Error('Failed to parse card information - no content in response');
+  } catch (error) {
+    console.error('OpenAI API request failed:', error);
+    throw error;
   }
-  
-  throw new Error('Failed to parse card information');
 }
 
 async function searchComparableSales(cardInfo: string, sources: string[]): Promise<SalesResult[]> {
+  console.log('=== SEARCH COMPARABLE SALES ===');
+  console.log(`Searching for: ${cardInfo} across sources: ${sources.join(', ')}`);
+  
   // This is a mock implementation. In a real app, you would integrate with actual APIs
   // from eBay, 130point, Goldin, and PWCC
   
-  console.log(`Searching for: ${cardInfo} across sources: ${sources.join(', ')}`);
-  
-  // Simulate different results based on card info and sources
   const mockResults: SalesResult[] = [];
   let idCounter = 1;
 
-  if (sources.includes('ebay')) {
-    mockResults.push({
-      id: (idCounter++).toString(),
-      title: `${cardInfo} - eBay Sale`,
-      price: Math.floor(Math.random() * 200) + 50,
-      date: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      source: 'eBay',
-      url: 'https://ebay.com/itm/123456789',
-      selected: true
-    });
-  }
+  try {
+    if (sources.includes('ebay')) {
+      mockResults.push({
+        id: (idCounter++).toString(),
+        title: `${cardInfo} - eBay Sale`,
+        price: Math.floor(Math.random() * 200) + 50,
+        date: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        source: 'eBay',
+        url: 'https://ebay.com/itm/123456789',
+        selected: true
+      });
+    }
 
-  if (sources.includes('130point')) {
-    mockResults.push({
-      id: (idCounter++).toString(),
-      title: `${cardInfo} - 130point Auction`,
-      price: Math.floor(Math.random() * 250) + 75,
-      date: new Date(Date.now() - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      source: '130point',
-      url: 'https://130point.com/sales/123456',
-      selected: true
-    });
-  }
+    if (sources.includes('130point')) {
+      mockResults.push({
+        id: (idCounter++).toString(),
+        title: `${cardInfo} - 130point Auction`,
+        price: Math.floor(Math.random() * 250) + 75,
+        date: new Date(Date.now() - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        source: '130point',
+        url: 'https://130point.com/sales/123456',
+        selected: true
+      });
+    }
 
-  if (sources.includes('goldin')) {
-    mockResults.push({
-      id: (idCounter++).toString(),
-      title: `${cardInfo} - Goldin Auction`,
-      price: Math.floor(Math.random() * 300) + 100,
-      date: new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      source: 'Goldin',
-      url: 'https://goldin.co/lot/123456',
-      selected: true
-    });
-  }
+    if (sources.includes('goldin')) {
+      mockResults.push({
+        id: (idCounter++).toString(),
+        title: `${cardInfo} - Goldin Auction`,
+        price: Math.floor(Math.random() * 300) + 100,
+        date: new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        source: 'Goldin',
+        url: 'https://goldin.co/lot/123456',
+        selected: true
+      });
+    }
 
-  if (sources.includes('pwcc')) {
-    mockResults.push({
-      id: (idCounter++).toString(),
-      title: `${cardInfo} - PWCC Marketplace`,
-      price: Math.floor(Math.random() * 180) + 60,
-      date: new Date(Date.now() - Math.random() * 45 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      source: 'PWCC',
-      url: 'https://pwccmarketplace.com/lot/123456',
-      selected: true
-    });
-  }
+    if (sources.includes('pwcc')) {
+      mockResults.push({
+        id: (idCounter++).toString(),
+        title: `${cardInfo} - PWCC Marketplace`,
+        price: Math.floor(Math.random() * 180) + 60,
+        date: new Date(Date.now() - Math.random() * 45 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        source: 'PWCC',
+        url: 'https://pwccmarketplace.com/lot/123456',
+        selected: true
+      });
+    }
 
-  return mockResults;
+    console.log(`Generated ${mockResults.length} mock sales results`);
+    return mockResults;
+  } catch (error) {
+    console.error('Error generating mock sales data:', error);
+    throw error;
+  }
 }
 
 function calculateEstimatedValue(salesResults: SalesResult[], compLogic: string): number {
+  console.log('=== CALCULATE ESTIMATED VALUE ===');
+  console.log(`Calculation logic: ${compLogic}`);
+  
   const selectedResults = salesResults.filter(r => r.selected);
+  console.log(`Selected results: ${selectedResults.length}`);
   
   if (selectedResults.length === 0) {
+    console.log('No selected results, returning 0');
     return 0;
   }
 
   const prices = selectedResults.map(r => r.price);
+  console.log('Prices:', prices);
   
-  switch (compLogic) {
-    case 'average3':
-      // Take average of up to 3 most recent sales
-      const recent3 = prices.slice(0, 3);
-      return Math.round((recent3.reduce((sum, price) => sum + price, 0) / recent3.length) * 100) / 100;
-    
-    case 'median':
-      const sorted = [...prices].sort((a, b) => a - b);
-      const mid = Math.floor(sorted.length / 2);
-      return sorted.length % 2 === 0 
-        ? Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 100) / 100
-        : sorted[mid];
-    
-    case 'mode':
-      // Find most common price range (within $10)
-      const ranges: { [key: string]: number[] } = {};
-      prices.forEach(price => {
-        const range = Math.floor(price / 10) * 10;
-        if (!ranges[range]) ranges[range] = [];
-        ranges[range].push(price);
-      });
+  let result = 0;
+  
+  try {
+    switch (compLogic) {
+      case 'average3':
+        // Take average of up to 3 most recent sales
+        const recent3 = prices.slice(0, 3);
+        result = Math.round((recent3.reduce((sum, price) => sum + price, 0) / recent3.length) * 100) / 100;
+        break;
       
-      const mostCommonRange = Object.values(ranges).reduce((max, current) => 
-        current.length > max.length ? current : max
-      );
+      case 'median':
+        const sorted = [...prices].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        result = sorted.length % 2 === 0 
+          ? Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 100) / 100
+          : sorted[mid];
+        break;
       
-      return Math.round((mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length) * 100) / 100;
+      case 'mode':
+        // Find most common price range (within $10)
+        const ranges: { [key: string]: number[] } = {};
+        prices.forEach(price => {
+          const range = Math.floor(price / 10) * 10;
+          if (!ranges[range]) ranges[range] = [];
+          ranges[range].push(price);
+        });
+        
+        const mostCommonRange = Object.values(ranges).reduce((max, current) => 
+          current.length > max.length ? current : max
+        );
+        
+        result = Math.round((mostCommonRange.reduce((sum, price) => sum + price, 0) / mostCommonRange.length) * 100) / 100;
+        break;
+      
+      case 'conservative':
+        // Take 25th percentile
+        const sortedConservative = [...prices].sort((a, b) => a - b);
+        const index = Math.floor(sortedConservative.length * 0.25);
+        result = sortedConservative[index];
+        break;
+      
+      default:
+        // Default to average
+        result = Math.round((prices.reduce((sum, price) => sum + price, 0) / prices.length) * 100) / 100;
+        break;
+    }
     
-    case 'conservative':
-      // Take 25th percentile
-      const sortedConservative = [...prices].sort((a, b) => a - b);
-      const index = Math.floor(sortedConservative.length * 0.25);
-      return sortedConservative[index];
-    
-    default:
-      // Default to average
-      return Math.round((prices.reduce((sum, price) => sum + price, 0) / prices.length) * 100) / 100;
+    console.log(`Calculated value: ${result}`);
+    return result;
+  } catch (error) {
+    console.error('Error in value calculation:', error);
+    throw error;
   }
 }
