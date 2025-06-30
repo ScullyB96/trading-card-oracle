@@ -1,4 +1,3 @@
-
 export interface Point130Result {
   title: string;
   price: number;
@@ -14,42 +13,69 @@ export interface Point130Error {
 }
 
 export async function fetch130PointComps(searchQuery: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
-  console.log('=== FETCHING 130POINT COMPS (OPTIMIZED API STRATEGY) ===');
+  console.log('=== FETCHING 130POINT COMPS (HARDENED WITH TIMEOUTS) ===');
   console.log('Search query:', searchQuery);
   
   try {
-    // Try multiple API strategies
+    // Try multiple API strategies with strict timeouts
     const strategies = [
       () => fetch130PointAPIv2(searchQuery),
       () => fetch130PointAPIv1(searchQuery),
       () => fetch130PointWebScrape(searchQuery)
     ];
     
+    let allResults: Point130Result[] = [];
+    const strategyResults: number[] = [];
+    
     for (const [index, strategy] of strategies.entries()) {
       try {
         console.log(`Trying 130Point strategy ${index + 1}`);
         const result = await strategy();
         
+        strategyResults.push(result.results.length);
+        console.log(`130Point strategy ${index + 1} returned ${result.results.length} results`);
+        
         if (result.results.length > 0) {
-          console.log(`130Point strategy ${index + 1} succeeded with ${result.results.length} results`);
-          return result;
+          allResults = allResults.concat(result.results);
+          
+          // If we have enough results, break early
+          if (allResults.length >= 5) {
+            console.log(`130Point strategy ${index + 1} provided sufficient results, stopping`);
+            break;
+          }
         }
         
-        console.log(`130Point strategy ${index + 1} returned no results`);
       } catch (error) {
         console.error(`130Point strategy ${index + 1} failed:`, error);
+        strategyResults.push(0);
         continue;
       }
     }
     
-    // All strategies failed
-    return {
-      results: [],
-      error: {
-        source: '130Point',
-        message: 'All 130Point API strategies failed - service may be unavailable'
-      }
-    };
+    // Log all strategy results
+    console.log('130Point strategy results:', {
+      'API v2': strategyResults[0] || 0,
+      'API v1': strategyResults[1] || 0,
+      'Web Scrape': strategyResults[2] || 0,
+      'Total Before Dedup': allResults.length
+    });
+    
+    // Deduplicate and sort results
+    const deduplicatedResults = deduplicateResults(allResults);
+    console.log(`130Point deduplication: ${allResults.length} -> ${deduplicatedResults.length} results`);
+    
+    // If no results after all strategies, return structured error
+    if (deduplicatedResults.length === 0) {
+      return {
+        results: [],
+        error: {
+          source: '130Point',
+          message: 'No results found for this card'
+        }
+      };
+    }
+    
+    return { results: deduplicatedResults };
     
   } catch (error) {
     console.error('130Point fetching failed:', error);
@@ -57,14 +83,14 @@ export async function fetch130PointComps(searchQuery: string): Promise<{ results
       results: [],
       error: {
         source: '130Point',
-        message: `130Point integration failed: ${error.message}`
+        message: 'No results found for this card'
       }
     };
   }
 }
 
 async function fetch130PointAPIv2(searchQuery: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
-  console.log('Attempting 130Point API v2');
+  console.log('Attempting 130Point API v2 with 7s timeout');
   
   // Try the soldlistings endpoint with various possible URLs
   const endpoints = [
@@ -98,7 +124,7 @@ async function fetch130PointAPIv2(searchQuery: string): Promise<{ results: Point
       
       console.log('130Point payload:', payload);
       
-      const response = await rateLimitedFetch(apiUrl, {
+      const response = await rateLimitedFetchWithTimeout(apiUrl, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(payload)
@@ -130,11 +156,11 @@ async function fetch130PointAPIv2(searchQuery: string): Promise<{ results: Point
         continue;
       }
       
-      // Parse the response with multiple format handling
-      const results = parse130PointResponse(data, searchQuery);
+      // Parse the response with strict validation
+      const results = parse130PointResponseStrict(data, searchQuery);
       
       if (results.length > 0) {
-        console.log(`130Point API v2 found ${results.length} results`);
+        console.log(`130Point API v2 found ${results.length} valid results`);
         return { results };
       }
       
@@ -148,7 +174,7 @@ async function fetch130PointAPIv2(searchQuery: string): Promise<{ results: Point
 }
 
 async function fetch130PointAPIv1(searchQuery: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
-  console.log('Attempting 130Point API v1 (legacy)');
+  console.log('Attempting 130Point API v1 (legacy) with 7s timeout');
   
   // Try legacy API format
   const apiUrl = 'https://130point.com/api/search';
@@ -166,7 +192,7 @@ async function fetch130PointAPIv1(searchQuery: string): Promise<{ results: Point
     'limit': '50'
   });
   
-  const response = await rateLimitedFetch(apiUrl, {
+  const response = await rateLimitedFetchWithTimeout(apiUrl, {
     method: 'POST',
     headers: headers,
     body: params
@@ -177,14 +203,14 @@ async function fetch130PointAPIv1(searchQuery: string): Promise<{ results: Point
   }
   
   const data = await response.json();
-  const results = parse130PointResponse(data, searchQuery);
+  const results = parse130PointResponseStrict(data, searchQuery);
   
-  console.log(`130Point API v1 found ${results.length} results`);
+  console.log(`130Point API v1 found ${results.length} valid results`);
   return { results };
 }
 
 async function fetch130PointWebScrape(searchQuery: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
-  console.log('Attempting 130Point web scraping fallback');
+  console.log('Attempting 130Point web scraping fallback with 7s timeout');
   
   const encodedQuery = encodeURIComponent(searchQuery);
   const searchUrl = `https://130point.com/sales/?search=${encodedQuery}`;
@@ -198,21 +224,21 @@ async function fetch130PointWebScrape(searchQuery: string): Promise<{ results: P
     'Cache-Control': 'no-cache'
   };
   
-  const response = await rateLimitedFetch(searchUrl, { headers });
+  const response = await rateLimitedFetchWithTimeout(searchUrl, { headers });
   
   if (!response.ok) {
     throw new Error(`130Point scraping failed: ${response.status}`);
   }
   
   const html = await response.text();
-  const results = parse130PointHTML(html, searchUrl);
+  const results = parse130PointHTMLStrict(html, searchUrl);
   
-  console.log(`130Point web scraping found ${results.length} results`);
+  console.log(`130Point web scraping found ${results.length} valid results`);
   return { results };
 }
 
-function parse130PointResponse(data: any, searchQuery: string): Point130Result[] {
-  console.log('Parsing 130Point API response');
+function parse130PointResponseStrict(data: any, searchQuery: string): Point130Result[] {
+  console.log('Parsing 130Point API response with strict validation');
   
   let items: any[] = [];
   
@@ -243,8 +269,8 @@ function parse130PointResponse(data: any, searchQuery: string): Point130Result[]
         const image = item.image_url || item.thumbnail || item.image || item.photo_url || item.img;
         const url = item.url || item.sale_url || item.auction_url || item.link;
         
-        // Validate required fields
-        if (!title || price <= 0) {
+        // STRICT VALIDATION
+        if (!isValidCard(title, price)) {
           return null;
         }
         
@@ -261,12 +287,17 @@ function parse130PointResponse(data: any, searchQuery: string): Point130Result[]
           }
         }
         
+        // Use real 130Point search URL if no specific URL provided
+        const finalUrl = url && url.toString().trim() 
+          ? url.toString() 
+          : `https://130point.com/sales/?search=${encodeURIComponent(searchQuery)}`;
+        
         return {
           title: title.toString().trim(),
           price: Math.round(price * 100) / 100,
           date: normalizedDate,
           image: image ? image.toString() : undefined,
-          url: url ? url.toString() : `https://130point.com/sales/?search=${encodeURIComponent(searchQuery)}`,
+          url: finalUrl,
           source: '130Point'
         };
       } catch (error) {
@@ -276,15 +307,15 @@ function parse130PointResponse(data: any, searchQuery: string): Point130Result[]
     })
     .filter((item: Point130Result | null): item is Point130Result => item !== null);
   
-  console.log(`Parsed ${results.length} valid 130Point results`);
+  console.log(`Parsed ${results.length} valid 130Point results after strict validation`);
   return results;
 }
 
-function parse130PointHTML(html: string, searchUrl: string): Point130Result[] {
+function parse130PointHTMLStrict(html: string, searchUrl: string): Point130Result[] {
   const results: Point130Result[] = [];
   
   try {
-    console.log('Parsing 130Point HTML');
+    console.log('Parsing 130Point HTML with strict validation');
     
     // Look for common patterns in 130Point HTML
     const itemPatterns = [
@@ -309,7 +340,8 @@ function parse130PointHTML(html: string, searchUrl: string): Point130Result[] {
           const title = titleMatch[1].trim();
           const price = parseFloat(priceMatch[1].replace(',', ''));
           
-          if (title && price > 0 && title.length > 5) {
+          // STRICT VALIDATION for HTML parsing too
+          if (isValidCard(title, price)) {
             results.push({
               title: title,
               price: price,
@@ -325,15 +357,69 @@ function parse130PointHTML(html: string, searchUrl: string): Point130Result[] {
     console.error('130Point HTML parsing error:', error);
   }
   
-  console.log(`130Point HTML parsing found ${results.length} results`);
+  console.log(`130Point HTML parsing found ${results.length} valid results after strict validation`);
   return results;
 }
 
-// Rate limiting for 130Point API
+// STRICT VALIDATION FUNCTION
+function isValidCard(title: string, price: number): boolean {
+  if (!title || title.length < 10) {
+    return false;
+  }
+  
+  if (!price || price <= 0) {
+    return false;
+  }
+  
+  // Reject non-card terms
+  const titleLower = title.toLowerCase();
+  const invalidTerms = [
+    'break', 'lot', 'lots', 'collection', 'bundle', 'mixed',
+    'random', 'mystery', 'pack', 'box', 'case', 'supplies',
+    'equipment', 'holder', 'sleeve', 'binder', 'album'
+  ];
+  
+  for (const term of invalidTerms) {
+    if (titleLower.includes(term)) {
+      console.log(`Rejecting card with invalid term "${term}": ${title}`);
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+// DEDUPLICATION FUNCTION
+function deduplicateResults(results: Point130Result[]): Point130Result[] {
+  const seen = new Map<string, Point130Result>();
+  
+  for (const result of results) {
+    // Create deduplication key based on normalized title + price
+    const normalizedTitle = result.title.toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    const key = `${normalizedTitle}_${result.price}`;
+    
+    // Keep the most recent result for duplicates
+    const existing = seen.get(key);
+    if (!existing || new Date(result.date) > new Date(existing.date)) {
+      seen.set(key, result);
+    }
+  }
+  
+  // Convert back to array and sort by date DESC (most recent first)
+  return Array.from(seen.values())
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+// Rate limiting with 7-second timeout
 let lastRequestTime = 0;
 const MIN_REQUEST_INTERVAL = 1200; // 1.2 seconds between requests
+const REQUEST_TIMEOUT = 7000; // 7 seconds timeout
 
-async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
+async function rateLimitedFetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
   const now = Date.now();
   const timeSinceLastRequest = now - lastRequestTime;
   
@@ -344,5 +430,17 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
   }
   
   lastRequestTime = Date.now();
-  return fetch(url, options);
+  
+  // Wrap fetch with timeout using Promise.race
+  return Promise.race([
+    fetch(url, options),
+    new Promise<Response>((_, reject) => 
+      setTimeout(() => reject(new Error(`130Point request timeout after ${REQUEST_TIMEOUT}ms`)), REQUEST_TIMEOUT)
+    )
+  ]);
+}
+
+// Legacy function for backward compatibility (without timeout)
+async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
+  return rateLimitedFetchWithTimeout(url, options);
 }

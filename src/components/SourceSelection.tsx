@@ -1,7 +1,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Globe, Clock, AlertTriangle } from "lucide-react";
+import { Globe } from "lucide-react";
 
 interface SourceSelectionProps {
   selectedSources: string[];
@@ -18,7 +18,7 @@ const sources = [
   { 
     id: "130point", 
     name: "130point", 
-    description: "Auction tracking (may be slow)",
+    description: "Auction tracking with strict validation",
     status: "available"
   }
 ];
@@ -38,7 +38,6 @@ export const SourceSelection = ({ selectedSources, onSourcesChange }: SourceSele
         <CardTitle className="flex items-center space-x-2 text-lg">
           <Globe className="h-5 w-5 text-blue-600" />
           <span>Data Sources</span>
-          <Clock className="h-4 w-4 text-amber-500" />
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -69,21 +68,6 @@ export const SourceSelection = ({ selectedSources, onSourcesChange }: SourceSele
               </div>
             </div>
           ))}
-        </div>
-        
-        <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="h-4 w-4 text-blue-600 mt-0.5 flex-shrink-0" />
-            <div className="text-xs text-blue-700">
-              <p className="font-medium">Performance Improvements:</p>
-              <ul className="mt-1 space-y-1">
-                <li>• 8-second timeout per request</li>
-                <li>• Limited to 4 search variations</li>
-                <li>• Stops after 2 successful matches</li>
-                <li>• Enhanced error handling</li>
-              </ul>
-            </div>
-          </div>
         </div>
         
         {selectedSources.length === 0 && (
