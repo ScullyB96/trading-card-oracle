@@ -104,7 +104,7 @@ serve(async (req) => {
               traceId: 'billing-disabled'
             }),
             {
-              status: 400, // Changed from 500 to 400 since it's a configuration issue
+              status: 400,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             }
           );
@@ -120,7 +120,7 @@ serve(async (req) => {
               traceId: 'vision-api-disabled'
             }),
             {
-              status: 400, // Changed from 500 to 400 since it's a configuration issue
+              status: 400,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             }
           );
@@ -135,7 +135,7 @@ serve(async (req) => {
             traceId: 'image-processing-error'
           }),
           {
-            status: 400, // Changed from 500 to 400 for client-side issues
+            status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           }
         );
@@ -154,6 +154,24 @@ serve(async (req) => {
       console.log('Parsed card info:', parsedCardInfo);
     } catch (error) {
       console.error('Card parsing failed:', error);
+      
+      // Check for OpenAI quota errors
+      if (error.message.includes('insufficient_quota') || error.message.includes('exceeded your current quota')) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'OpenAI API quota exceeded',
+            details: 'The OpenAI API quota has been exceeded. Please check your OpenAI account billing and usage limits.',
+            suggestion: 'You can still use the app by providing a detailed card description instead of relying on AI parsing.',
+            traceId: 'openai-quota-exceeded'
+          }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
+      }
+      
       return new Response(
         JSON.stringify({
           success: false,
@@ -390,7 +408,17 @@ async function parseCardInformation(rawText: string): Promise<string> {
     if (!response.ok) {
       const errorText = await response.text();
       console.error('OpenAI API error response:', errorText);
-      throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+      
+      // Parse the error to provide more specific messages
+      try {
+        const errorData = JSON.parse(errorText);
+        if (errorData.error?.type === 'insufficient_quota') {
+          throw new Error(`insufficient_quota: ${errorData.error.message}`);
+        }
+        throw new Error(`OpenAI API error: ${errorData.error?.message || errorText}`);
+      } catch (parseError) {
+        throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+      }
     }
 
     const data = await response.json();
