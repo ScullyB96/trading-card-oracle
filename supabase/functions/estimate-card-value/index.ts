@@ -1,10 +1,9 @@
-
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { corsHeaders } from './config.ts'
-import { Logger } from './logger.ts'
-import { parseCardFromImage, parseCardFromDescription } from './card-parser.ts'
-import { fetchProductionComps } from './sales-scrapers.ts'
-import { CardEstimationError, handleError } from './errors.ts'
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { corsHeaders } from './config.ts'; // Import centralized headers
+import { Logger } from './logger.ts';
+import { parseCardFromImage, parseCardFromDescription } from './card-parser.ts';
+import { CardEstimationError, handleError } from './errors.ts';
+import { fetchProductionComps } from './sales-scrapers.ts';
 
 interface EstimationRequest {
   image?: string;
@@ -14,16 +13,17 @@ interface EstimationRequest {
 }
 
 serve(async (req) => {
-  // Handle CORS preflight requests
+  // **IMPROVED CORS HANDLING**
+  // Handle CORS preflight requests by returning a 204 No Content response.
+  // This is a standard and robust way to handle preflight checks.
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { headers: corsHeaders, status: 204 });
   }
 
   const logger = new Logger();
   let traceId = '';
 
   try {
-    // Parse request body
     const requestBody: EstimationRequest = await req.json();
     traceId = `est_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
@@ -36,7 +36,6 @@ serve(async (req) => {
       hasDescription: !!requestBody.description
     });
 
-    // Validate request
     if (!requestBody.image && !requestBody.description) {
       throw new CardEstimationError('Either image or description is required', 'INVALID_INPUT', traceId);
     }
@@ -45,58 +44,15 @@ serve(async (req) => {
       throw new CardEstimationError('At least one source is required', 'INVALID_INPUT', traceId);
     }
 
-    // Parse card information
     let cardKeywords;
-    try {
-      if (requestBody.image) {
+    if (requestBody.description) {
+        logger.info('Parsing card from description', { operation: 'parseCardFromDescription', traceId });
+        cardKeywords = await parseCardFromDescription(requestBody.description, logger);
+    } else if (requestBody.image) {
         logger.info('Parsing card from image', { operation: 'parseCardFromImage', traceId });
         cardKeywords = await parseCardFromImage(requestBody.image, logger);
-      } else {
-        logger.info('Parsing card from description', { operation: 'parseCardFromDescription', traceId });
-        cardKeywords = await parseCardFromDescription(requestBody.description!, logger);
-      }
-    } catch (error: any) {
-      logger.error('Card parsing failed', { 
-        operation: 'parseCard', 
-        traceId, 
-        error: error.message 
-      });
-      
-      // Handle specific API errors with user-friendly messages
-      if (error.message?.includes('billing') || error.message?.includes('BILLING_NOT_ENABLED')) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: 'Google Vision API billing required',
-          details: 'Please enable billing for the Google Vision API or use the card description method.',
-          traceId: 'billing-disabled'
-        }), {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
-      
-      if (error.message?.includes('API_NOT_ENABLED') || error.message?.includes('vision')) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: 'Google Vision API not enabled',
-          details: 'Please enable the Google Vision API or use the card description method.',
-          traceId: 'vision-api-disabled'
-        }), {
-          status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
-      
-      // For other parsing errors, provide a generic fallback
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Card parsing failed',
-        details: 'Unable to extract card information. Please try using the card description method.',
-        traceId
-      }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
+    } else {
+        throw new CardEstimationError('No input provided.', 'INVALID_INPUT', traceId);
     }
 
     logger.info('Card parsing complete', {
@@ -106,75 +62,34 @@ serve(async (req) => {
       year: cardKeywords.year,
       set: cardKeywords.set
     });
+    
+    const productionResult = await fetchProductionComps(
+      cardKeywords,
+      requestBody.sources,
+      requestBody.compLogic
+    );
 
-    // Use the centralized scraping function with error handling
-    let scrapingResult;
-    try {
-      scrapingResult = await fetchProductionComps(
-        cardKeywords,
-        requestBody.sources,
-        requestBody.compLogic
-      );
-    } catch (error: any) {
-      logger.error('Scraping failed', { 
-        operation: 'fetchProductionComps', 
-        traceId, 
-        error: error.message 
-      });
-      
-      // Return a partial success response with error information
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Data collection failed',
-        details: 'Unable to collect pricing data from the selected sources. Please try again or select different sources.',
-        traceId,
-        cardInfo: cardKeywords,
-        estimatedValue: null,
-        comps: [],
-        warnings: [`Data collection error: ${error.message}`]
-      }), {
-        status: 200, // Use 200 for partial failures to allow frontend handling
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
+    const response = {
+      success: true,
+      traceId,
+      cardInfo: cardKeywords,
+      ...productionResult
+    };
 
     logger.info('Card estimation complete', {
       operation: 'estimate-card-value',
       traceId,
-      estimatedValue: scrapingResult.estimatedValue,
-      compsFound: scrapingResult.comps.length,
-      success: scrapingResult.success
+      estimatedValue: productionResult.estimatedValue,
+      compsFound: productionResult.comps.length,
+      success: true
     });
 
-    // Return consistent response structure
-    const response = {
-      success: scrapingResult.success,
-      traceId,
-      cardInfo: cardKeywords,
-      estimatedValue: scrapingResult.estimatedValue,
-      confidence: scrapingResult.confidence,
-      methodology: scrapingResult.methodology,
-      comps: scrapingResult.comps,
-      warnings: scrapingResult.warnings,
-      exactMatchFound: scrapingResult.exactMatchFound,
-      matchMessage: scrapingResult.matchMessage,
-      dataPoints: scrapingResult.dataPoints,
-      priceRange: scrapingResult.priceRange,
-      productionResponse: scrapingResult.productionResponse
-    };
-
     return new Response(JSON.stringify(response), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200
     });
 
   } catch (error: any) {
-    logger.error('Unexpected error in main handler', { 
-      operation: 'estimate-card-value', 
-      traceId, 
-      error: error.message,
-      stack: error.stack 
-    });
-    
     return handleError(error, traceId, logger);
   }
 });
