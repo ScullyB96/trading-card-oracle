@@ -1,288 +1,249 @@
 
 import { config } from './config.ts';
 import { Logger } from './logger.ts';
+import { generateSearchQueries, QueryGenerationOptions, GeneratedQuery } from './query-generator.ts';
 import { withTimeout } from './utils.ts';
-import { generateSiteSpecificQueries } from './query-generator.ts';
+import { CardEstimationError } from './errors.ts';
 
-export interface GoogleSearchResult {
+export interface SearchResult {
   title: string;
-  link: string;
-  snippet: string;
-  displayLink: string;
-}
-
-export interface DiscoveredListing {
   url: string;
-  title: string;
   snippet: string;
-  source: 'ebay' | '130point' | 'pwcc' | 'other';
-  confidence: number;
+  source: string;
 }
 
-export interface GoogleDiscoveryResult {
-  discoveredListings: DiscoveredListing[];
+export interface GoogleSearchResponse {
+  results: SearchResult[];
   totalResults: number;
-  queriesExecuted: string[];
-  errors: Array<{ source: string; message: string }>;
+  searchTime: number;
+  query: string;
+  success: boolean;
+  error?: string;
 }
 
-export async function discoverListingsViaGoogle(
-  searchQueries: string[],
-  logger: Logger,
-  maxResults: number = 20
-): Promise<GoogleDiscoveryResult> {
-  logger.info('Starting optimized Google Search discovery', {
-    operation: 'discoverListingsViaGoogle',
-    queryCount: searchQueries.length,
-    maxResults
-  });
+export async function performGoogleSearch(
+  cardInfo: QueryGenerationOptions,
+  logger: Logger
+): Promise<GoogleSearchResponse> {
+  const startTime = Date.now();
+  
+  try {
+    // Check if Google Search API is configured
+    if (!config.googleSearchApiKey || !config.googleSearchEngineId) {
+      logger.warn('Google Search API not configured', { 
+        operation: 'performGoogleSearch',
+        hasApiKey: !!config.googleSearchApiKey,
+        hasEngineId: !!config.googleSearchEngineId
+      });
+      
+      return {
+        results: [],
+        totalResults: 0,
+        searchTime: Date.now() - startTime,
+        query: '',
+        success: false,
+        error: 'Google Search API not configured'
+      };
+    }
 
-  if (!config.googleSearchApiKey || !config.googleSearchEngineId) {
-    logger.warn('Google Search API not configured, skipping discovery');
+    const queries = generateSearchQueries(cardInfo);
+    logger.info('Generated search queries', { 
+      operation: 'performGoogleSearch',
+      queryCount: queries.length,
+      topQuery: queries[0]?.query
+    });
+
+    if (queries.length === 0) {
+      return {
+        results: [],
+        totalResults: 0,
+        searchTime: Date.now() - startTime,
+        query: '',
+        success: false,
+        error: 'No search queries generated'
+      };
+    }
+
+    // Try the top priority queries first
+    const priorityQueries = queries.slice(0, 3);
+    const allResults: SearchResult[] = [];
+    let lastError: string | undefined;
+
+    for (const queryObj of priorityQueries) {
+      try {
+        logger.info('Executing Google search', { 
+          operation: 'performGoogleSearch',
+          query: queryObj.query,
+          priority: queryObj.priority
+        });
+
+        const searchResults = await executeGoogleSearch(queryObj, logger);
+        
+        if (searchResults.results.length > 0) {
+          allResults.push(...searchResults.results);
+          logger.info('Google search successful', { 
+            operation: 'performGoogleSearch',
+            query: queryObj.query,
+            resultCount: searchResults.results.length
+          });
+        }
+
+        // If we have enough results, break early
+        if (allResults.length >= config.limits.maxSearchResults) {
+          break;
+        }
+
+      } catch (error: any) {
+        lastError = error.message;
+        logger.warn('Google search query failed', { 
+          operation: 'performGoogleSearch',
+          query: queryObj.query,
+          error: error.message
+        });
+        continue;
+      }
+    }
+
+    // Remove duplicates and limit results
+    const uniqueResults = removeDuplicateResults(allResults);
+    const limitedResults = uniqueResults.slice(0, config.limits.maxSearchResults);
+
+    const response: GoogleSearchResponse = {
+      results: limitedResults,
+      totalResults: limitedResults.length,
+      searchTime: Date.now() - startTime,
+      query: priorityQueries[0]?.query || '',
+      success: limitedResults.length > 0,
+      error: limitedResults.length === 0 ? lastError : undefined
+    };
+
+    logger.info('Google search completed', { 
+      operation: 'performGoogleSearch',
+      totalResults: response.totalResults,
+      searchTime: response.searchTime,
+      success: response.success
+    });
+
+    return response;
+
+  } catch (error: any) {
+    logger.error('Google search failed', { 
+      operation: 'performGoogleSearch',
+      error: error.message,
+      searchTime: Date.now() - startTime
+    });
+
     return {
-      discoveredListings: [],
+      results: [],
       totalResults: 0,
-      queriesExecuted: [],
-      errors: [{ source: 'Google Search API', message: 'Google Search API not configured' }]
+      searchTime: Date.now() - startTime,
+      query: '',
+      success: false,
+      error: error.message
     };
   }
-
-  const discoveredListings: DiscoveredListing[] = [];
-  const queriesExecuted: string[] = [];
-  const errors: Array<{ source: string; message: string }> = [];
-
-  // Limit to first 6 queries to avoid timeouts
-  const limitedQueries = searchQueries.slice(0, 6);
-
-  for (const baseQuery of limitedQueries) {
-    if (discoveredListings.length >= maxResults) {
-      logger.info('Maximum results reached, stopping search');
-      break;
-    }
-
-    try {
-      // Try general search first (more likely to find results)
-      logger.info(`Executing general search: ${baseQuery}`);
-      
-      const generalResults = await executeGoogleSearch(baseQuery, logger);
-      queriesExecuted.push(baseQuery);
-      
-      if (generalResults.length > 0) {
-        const categorizedResults = categorizeAndScoreResults(generalResults, baseQuery, logger);
-        discoveredListings.push(...categorizedResults);
-        
-        // If we found good results, try one site-specific query
-        if (categorizedResults.length > 0 && discoveredListings.length < maxResults) {
-          const siteQueries = generateSiteSpecificQueries(baseQuery);
-          if (siteQueries.length > 0) {
-            try {
-              const siteResults = await executeGoogleSearch(siteQueries[0], logger);
-              queriesExecuted.push(siteQueries[0]);
-              const moreCategorized = categorizeAndScoreResults(siteResults, baseQuery, logger);
-              discoveredListings.push(...moreCategorized);
-            } catch (siteError) {
-              logger.warn('Site-specific search failed', { error: siteError.message });
-            }
-          }
-        }
-      }
-      
-      // Rate limiting between searches
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-    } catch (error) {
-      logger.error('Search query failed', error, { query: baseQuery });
-      errors.push({
-        source: 'Google Search',
-        message: `Search failed for "${baseQuery}": ${error.message}`
-      });
-    }
-  }
-
-  // Remove duplicates and sort
-  const uniqueListings = deduplicateListings(discoveredListings, logger);
-  const sortedListings = sortListingsByRelevance(uniqueListings);
-
-  logger.info('Optimized Google Search discovery completed', {
-    operation: 'discoverListingsViaGoogle',
-    totalDiscovered: sortedListings.length,
-    queriesExecuted: queriesExecuted.length,
-    errors: errors.length
-  });
-
-  return {
-    discoveredListings: sortedListings.slice(0, maxResults),
-    totalResults: sortedListings.length,
-    queriesExecuted,
-    errors
-  };
 }
 
 async function executeGoogleSearch(
-  searchQuery: string,
+  queryObj: GeneratedQuery,
   logger: Logger
-): Promise<GoogleSearchResult[]> {
+): Promise<GoogleSearchResponse> {
   const searchUrl = new URL('https://www.googleapis.com/customsearch/v1');
   searchUrl.searchParams.set('key', config.googleSearchApiKey);
   searchUrl.searchParams.set('cx', config.googleSearchEngineId);
-  searchUrl.searchParams.set('q', searchQuery);
+  searchUrl.searchParams.set('q', queryObj.query);
   searchUrl.searchParams.set('num', '10');
   searchUrl.searchParams.set('safe', 'active');
 
   try {
     const response = await withTimeout(
       fetch(searchUrl.toString()),
-      10000, // 10 second timeout
+      config.timeout.search,
       'Google Search API'
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Google Search API error: ${response.status} - ${errorText}`);
+      throw new CardEstimationError(
+        `Google Search API error: ${response.status} ${response.statusText}`,
+        'GOOGLE_SEARCH_ERROR'
+      );
     }
 
     const data = await response.json();
     
     if (data.error) {
-      throw new Error(`Google Search API error: ${data.error.message}`);
+      throw new CardEstimationError(
+        `Google Search API error: ${data.error.message}`,
+        'GOOGLE_SEARCH_ERROR'
+      );
     }
 
-    const items = data.items || [];
-    const results: GoogleSearchResult[] = items.map((item: any) => ({
+    const results: SearchResult[] = (data.items || []).map((item: any) => ({
       title: item.title || '',
-      link: item.link || '',
+      url: item.link || '',
       snippet: item.snippet || '',
-      displayLink: item.displayLink || ''
+      source: extractDomain(item.link || '')
     }));
 
-    logger.info('Google Search completed', {
+    return {
+      results,
+      totalResults: results.length,
+      searchTime: 0,
+      query: queryObj.query,
+      success: true
+    };
+
+  } catch (error: any) {
+    logger.error('Google Search API request failed', {
       operation: 'executeGoogleSearch',
-      resultsFound: results.length,
-      query: searchQuery
+      query: queryObj.query,
+      error: error.message
     });
-
-    return results;
-
-  } catch (error) {
-    logger.error('Google Search API call failed', error, { query: searchQuery });
     throw error;
   }
 }
 
-function categorizeAndScoreResults(
-  searchResults: GoogleSearchResult[],
-  originalQuery: string,
-  logger: Logger
-): DiscoveredListing[] {
-  const listings: DiscoveredListing[] = [];
-
-  for (const result of searchResults) {
-    try {
-      let source: 'ebay' | '130point' | 'pwcc' | 'other' = 'other';
-      
-      if (result.link.includes('ebay.com')) {
-        source = 'ebay';
-      } else if (result.link.includes('130point.com')) {
-        source = '130point';
-      } else if (result.link.includes('pwcc.market')) {
-        source = 'pwcc';
-      }
-
-      // Skip if not from our target sources
-      if (source === 'other') {
-        continue;
-      }
-
-      const confidence = calculateListingConfidence(result, originalQuery);
-      
-      // Lower threshold for acceptance
-      if (confidence >= 0.2) {
-        listings.push({
-          url: result.link,
-          title: result.title,
-          snippet: result.snippet,
-          source,
-          confidence
-        });
-      }
-
-    } catch (error) {
-      logger.warn('Failed to categorize search result', { error: error.message, result: result.link });
-    }
+function extractDomain(url: string): string {
+  try {
+    const domain = new URL(url).hostname;
+    return domain.replace(/^www\./, '');
+  } catch {
+    return 'unknown';
   }
-
-  return listings;
 }
 
-function calculateListingConfidence(result: GoogleSearchResult, originalQuery: string): number {
-  let confidence = 0.3; // Base confidence
-
-  const title = result.title.toLowerCase();
-  const snippet = result.snippet.toLowerCase();
-  const queryTerms = originalQuery.toLowerCase().split(' ').filter(term => term.length > 2);
-
-  // Check for query terms in title (higher weight)
-  const titleMatches = queryTerms.filter(term => title.includes(term));
-  confidence += (titleMatches.length / queryTerms.length) * 0.4;
-
-  // Check for query terms in snippet
-  const snippetMatches = queryTerms.filter(term => snippet.includes(term));
-  confidence += (snippetMatches.length / queryTerms.length) * 0.2;
-
-  // Bonus for sold indicators
-  if (title.includes('sold') || snippet.includes('sold')) {
-    confidence += 0.15;
-  }
-
-  // Bonus for price indicators
-  if (title.includes('$') || snippet.includes('$')) {
-    confidence += 0.1;
-  }
-
-  // Bonus for rookie/RC indicators
-  if (title.includes('rookie') || title.includes(' rc ') || snippet.includes('rookie')) {
-    confidence += 0.1;
-  }
-
-  return Math.min(1.0, confidence);
+function removeDuplicateResults(results: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  return results.filter(result => {
+    const key = `${result.url}|${result.title}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
-function deduplicateListings(listings: DiscoveredListing[], logger: Logger): DiscoveredListing[] {
-  const seen = new Map<string, DiscoveredListing>();
-  
-  for (const listing of listings) {
-    const existing = seen.get(listing.url);
-    if (!existing || listing.confidence > existing.confidence) {
-      seen.set(listing.url, listing);
+export function filterSearchResultsBySource(
+  results: SearchResult[],
+  allowedSources: string[]
+): SearchResult[] {
+  const sourcePatterns = allowedSources.map(source => {
+    switch (source.toLowerCase()) {
+      case 'ebay':
+        return /ebay\.com/i;
+      case '130point':
+        return /130point\.com/i;
+      case 'comc':
+        return /comc\.com/i;
+      case 'beckett':
+        return /beckett\.com/i;
+      default:
+        return new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     }
-  }
-  
-  const uniqueListings = Array.from(seen.values());
-  
-  logger.info('Listing deduplication complete', {
-    operation: 'deduplicateListings',
-    originalCount: listings.length,
-    uniqueCount: uniqueListings.length
   });
 
-  return uniqueListings;
-}
-
-function sortListingsByRelevance(listings: DiscoveredListing[]): DiscoveredListing[] {
-  return listings.sort((a, b) => {
-    // First by confidence
-    if (Math.abs(a.confidence - b.confidence) > 0.1) {
-      return b.confidence - a.confidence;
-    }
-    
-    // Then by source preference
-    const sourcePreference: { [key: string]: number } = {
-      ebay: 3,
-      '130point': 2,
-      pwcc: 1,
-      other: 0
-    };
-    
-    return sourcePreference[b.source] - sourcePreference[a.source];
+  return results.filter(result => {
+    return sourcePatterns.some(pattern => pattern.test(result.url));
   });
 }

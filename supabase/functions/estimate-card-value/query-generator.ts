@@ -1,163 +1,239 @@
 
-import { ExtractedCardKeywords } from './vision-parser.ts';
-import { Logger } from './logger.ts';
-
-export interface QuerySet {
-  primaryQueries: string[];
-  secondaryQueries: string[];
-  fallbackQueries: string[];
-  allQueries: string[];
+export interface QueryGenerationOptions {
+  player: string;
+  year?: string;
+  set?: string;
+  sport?: string;
+  brand?: string;
+  cardNumber?: string;
+  type?: string;
+  variant?: string;
 }
 
-export function generateSearchQueries(cardKeywords: ExtractedCardKeywords, logger: Logger): QuerySet {
-  logger.info('Generating enhanced search queries v2.0', {
-    operation: 'generateSearchQueries',
-    player: cardKeywords.player,
-    year: cardKeywords.year,
-    set: cardKeywords.set
-  });
+export interface GeneratedQuery {
+  query: string;
+  priority: number;
+  type: 'exact' | 'broad' | 'fallback';
+  description: string;
+}
 
-  const primaryQueries: string[] = [];
-  const secondaryQueries: string[] = [];
-  const fallbackQueries: string[] = [];
+export function generateSiteSpecificQueries(
+  cardInfo: QueryGenerationOptions,
+  site: string
+): GeneratedQuery[] {
+  const queries: GeneratedQuery[] = [];
+  const { player, year, set, sport, brand, cardNumber, type, variant } = cardInfo;
 
-  const player = normalizePlayerName(cardKeywords.player);
-  const year = cardKeywords.year !== 'unknown' ? cardKeywords.year : '';
-  const set = cardKeywords.set !== 'unknown' ? cardKeywords.set : '';
-  const cardNumber = cardKeywords.cardNumber !== 'unknown' ? cardKeywords.cardNumber : '';
-  const sport = cardKeywords.sport || 'card';
+  // Base query components
+  const playerName = player?.trim() || '';
+  const cardYear = year?.trim() || '';
+  const cardSet = set?.trim() || '';
+  const cardSport = sport?.trim() || '';
+  const cardBrand = brand?.trim() || '';
+  const cardNum = cardNumber?.trim() || '';
+  const cardType = type?.trim() || '';
+  const cardVariant = variant?.trim() || '';
+
+  if (!playerName) {
+    return queries;
+  }
+
+  // Site-specific query generation
+  switch (site.toLowerCase()) {
+    case 'ebay':
+    case 'ebay.com':
+      queries.push(...generateEbayQueries(cardInfo));
+      break;
+    case '130point':
+    case '130point.com':
+      queries.push(...generate130PointQueries(cardInfo));
+      break;
+    default:
+      queries.push(...generateGenericQueries(cardInfo));
+  }
+
+  return queries.sort((a, b) => b.priority - a.priority);
+}
+
+function generateEbayQueries(cardInfo: QueryGenerationOptions): GeneratedQuery[] {
+  const { player, year, set, cardNumber, type } = cardInfo;
+  const queries: GeneratedQuery[] = [];
+
+  // Exact match with all details
+  if (player && year && set) {
+    queries.push({
+      query: `${player} ${year} ${set}${cardNumber ? ` #${cardNumber}` : ''}${type ? ` ${type}` : ''} card`,
+      priority: 10,
+      type: 'exact',
+      description: 'Full card details'
+    });
+  }
+
+  // Player and year
+  if (player && year) {
+    queries.push({
+      query: `${player} ${year} card`,
+      priority: 8,
+      type: 'broad',
+      description: 'Player and year'
+    });
+  }
+
+  // Player and set
+  if (player && set) {
+    queries.push({
+      query: `${player} ${set} card`,
+      priority: 7,
+      type: 'broad',
+      description: 'Player and set'
+    });
+  }
+
+  // Player only
+  if (player) {
+    queries.push({
+      query: `${player} card`,
+      priority: 5,
+      type: 'fallback',
+      description: 'Player only'
+    });
+  }
+
+  return queries;
+}
+
+function generate130PointQueries(cardInfo: QueryGenerationOptions): GeneratedQuery[] {
+  const { player, year, set, cardNumber } = cardInfo;
+  const queries: GeneratedQuery[] = [];
+
+  // 130Point specific format
+  if (player && year && set) {
+    queries.push({
+      query: `${player} ${year} ${set}${cardNumber ? ` ${cardNumber}` : ''}`,
+      priority: 10,
+      type: 'exact',
+      description: '130Point format'
+    });
+  }
+
+  if (player && year) {
+    queries.push({
+      query: `${player} ${year}`,
+      priority: 8,
+      type: 'broad',
+      description: 'Player and year'
+    });
+  }
+
+  if (player) {
+    queries.push({
+      query: player,
+      priority: 5,
+      type: 'fallback',
+      description: 'Player only'
+    });
+  }
+
+  return queries;
+}
+
+function generateGenericQueries(cardInfo: QueryGenerationOptions): GeneratedQuery[] {
+  const { player, year, set, cardNumber, type } = cardInfo;
+  const queries: GeneratedQuery[] = [];
+
+  // Generic queries for unknown sites
+  if (player && year && set) {
+    queries.push({
+      query: `"${player}" ${year} ${set}${cardNumber ? ` ${cardNumber}` : ''}`,
+      priority: 9,
+      type: 'exact',
+      description: 'Quoted player name with details'
+    });
+  }
+
+  if (player && year) {
+    queries.push({
+      query: `"${player}" ${year}`,
+      priority: 7,
+      type: 'broad',
+      description: 'Quoted player name and year'
+    });
+  }
+
+  if (player) {
+    queries.push({
+      query: `"${player}"`,
+      priority: 5,
+      type: 'fallback',
+      description: 'Quoted player name only'
+    });
+  }
+
+  return queries;
+}
+
+export function generateSearchQueries(cardInfo: QueryGenerationOptions): GeneratedQuery[] {
+  const queries: GeneratedQuery[] = [];
+  const { player, year, set, sport, cardNumber, type } = cardInfo;
 
   if (!player) {
-    logger.warn('No player name available for search queries');
-    return { primaryQueries: [], secondaryQueries: [], fallbackQueries: [], allQueries: [] };
+    return queries;
   }
 
-  // PRIMARY QUERIES (highest priority)
-  if (year && set) {
-    primaryQueries.push(`${player} ${year} ${set} card`);
-    primaryQueries.push(`${player} ${year} ${set}`);
-    
-    if (cardNumber) {
-      primaryQueries.push(`${player} ${year} ${set} #${cardNumber}`);
-      primaryQueries.push(`${player} ${year} ${set} ${cardNumber}`);
-    }
+  // High priority exact matches
+  if (player && year && set) {
+    queries.push({
+      query: `"${player}" ${year} ${set}${cardNumber ? ` #${cardNumber}` : ''} card sold`,
+      priority: 10,
+      type: 'exact',
+      description: 'Full card details with sold filter'
+    });
+
+    queries.push({
+      query: `${player} ${year} ${set}${cardNumber ? ` ${cardNumber}` : ''} trading card`,
+      priority: 9,
+      type: 'exact',
+      description: 'Full card details'
+    });
   }
 
-  if (year) {
-    primaryQueries.push(`${player} ${year} ${sport} card`);
-    primaryQueries.push(`${player} ${year} rookie card`);
-    primaryQueries.push(`${player} ${year} RC`);
+  // Medium priority broad matches
+  if (player && year) {
+    queries.push({
+      query: `"${player}" ${year}${sport ? ` ${sport}` : ''} card price`,
+      priority: 8,
+      type: 'broad',
+      description: 'Player, year, and sport'
+    });
   }
 
-  // SECONDARY QUERIES (good alternatives)
-  if (set && set !== 'unknown') {
-    secondaryQueries.push(`${player} ${set} card`);
-    secondaryQueries.push(`${player} ${set}`);
+  if (player && set) {
+    queries.push({
+      query: `"${player}" ${set} card value`,
+      priority: 7,
+      type: 'broad',
+      description: 'Player and set'
+    });
   }
 
-  // Add special attributes to queries
-  if (cardKeywords.specialAttributes && cardKeywords.specialAttributes.length > 0) {
-    for (const attr of cardKeywords.specialAttributes.slice(0, 2)) {
-      if (year) {
-        secondaryQueries.push(`${player} ${year} ${attr}`);
-      }
-      secondaryQueries.push(`${player} ${attr} card`);
-    }
+  // Fallback queries
+  if (player && sport) {
+    queries.push({
+      query: `"${player}" ${sport} card`,
+      priority: 6,
+      type: 'fallback',
+      description: 'Player and sport'
+    });
   }
 
-  // Add parallels to queries
-  if (cardKeywords.parallels && cardKeywords.parallels.length > 0) {
-    for (const parallel of cardKeywords.parallels.slice(0, 2)) {
-      if (year) {
-        secondaryQueries.push(`${player} ${year} ${parallel}`);
-      }
-      secondaryQueries.push(`${player} ${parallel} card`);
-    }
+  if (player) {
+    queries.push({
+      query: `"${player}" trading card`,
+      priority: 5,
+      type: 'fallback',
+      description: 'Player only'
+    });
   }
 
-  // FALLBACK QUERIES (broader searches)
-  fallbackQueries.push(`${player} ${sport} card`);
-  fallbackQueries.push(`${player} card`);
-  
-  if (year) {
-    fallbackQueries.push(`${player} ${year}`);
-  }
-
-  // Add team-based queries if available
-  if (cardKeywords.team && cardKeywords.team !== 'unknown') {
-    const teamName = normalizeTeamName(cardKeywords.team);
-    fallbackQueries.push(`${player} ${teamName} card`);
-    if (year) {
-      fallbackQueries.push(`${player} ${teamName} ${year}`);
-    }
-  }
-
-  // Clean and deduplicate queries
-  const cleanPrimary = cleanAndDeduplicateQueries(primaryQueries).slice(0, 4);
-  const cleanSecondary = cleanAndDeduplicateQueries(secondaryQueries).slice(0, 3);
-  const cleanFallback = cleanAndDeduplicateQueries(fallbackQueries).slice(0, 3);
-
-  const allQueries = [...cleanPrimary, ...cleanSecondary, ...cleanFallback];
-
-  logger.info('Enhanced query generation complete v2.0', {
-    operation: 'generateSearchQueries',
-    primaryCount: cleanPrimary.length,
-    secondaryCount: cleanSecondary.length,
-    fallbackCount: cleanFallback.length,
-    totalQueries: allQueries.length
-  });
-
-  return {
-    primaryQueries: cleanPrimary,
-    secondaryQueries: cleanSecondary,
-    fallbackQueries: cleanFallback,
-    allQueries
-  };
-}
-
-function normalizePlayerName(player: string): string {
-  if (!player || player === 'unknown') return '';
-  
-  return player
-    .trim()
-    .replace(/[^\w\s]/g, '') // Remove special characters
-    .replace(/\s+/g, ' ') // Normalize spaces
-    .split(' ')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
-}
-
-function normalizeTeamName(team: string): string {
-  if (!team || team === 'unknown') return '';
-  
-  // Common team name normalizations
-  const teamMappings: { [key: string]: string } = {
-    'washington commanders': 'Commanders',
-    'kansas city chiefs': 'Chiefs',
-    'los angeles lakers': 'Lakers',
-    'golden state warriors': 'Warriors',
-    'new york yankees': 'Yankees',
-    'boston celtics': 'Celtics'
-  };
-  
-  const normalized = team.toLowerCase().trim();
-  return teamMappings[normalized] || team.split(' ').pop() || team;
-}
-
-function cleanAndDeduplicateQueries(queries: string[]): string[] {
-  const cleaned = queries
-    .map(query => query.trim())
-    .filter(query => query.length > 5 && query.length < 100)
-    .map(query => query.replace(/\s+/g, ' '));
-  
-  // Deduplicate
-  const unique = [...new Set(cleaned)];
-  
-  return unique;
-}
-
-// Legacy function for backward compatibility
-export function buildSearchQuery(keywords: ExtractedCardKeywords): string {
-  const querySet = generateSearchQueries(keywords, { info: () => {}, warn: () => {}, error: () => {} } as Logger);
-  return querySet.primaryQueries[0] || querySet.allQueries[0] || 'card';
+  return queries.sort((a, b) => b.priority - a.priority);
 }

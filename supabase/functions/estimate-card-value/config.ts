@@ -63,28 +63,30 @@ export function loadConfiguration(): AppConfig {
   }
   
   // Log configuration status without throwing errors for optional APIs
+  console.log('Configuration loaded:');
+  
   if (config.googleVisionApiKey) {
     console.log('✅ Google Vision API configured successfully');
   } else {
-    console.warn('⚠️ Google Vision API key not configured - image processing will be disabled');
+    console.log('⚠️ Google Vision API key not configured - image processing will be disabled');
   }
   
   if (config.openaiApiKey) {
     console.log('✅ OpenAI API configured successfully');
   } else {
-    console.warn('⚠️ OpenAI API key not configured - AI features may be limited');
+    console.log('⚠️ OpenAI API key not configured - AI features may be limited');
   }
 
   if (config.googleSearchApiKey && config.googleSearchEngineId) {
     console.log('✅ Google Search API configured successfully');
   } else {
-    console.warn('⚠️ Google Search API not fully configured - search features may be limited');
+    console.log('⚠️ Google Search API not fully configured - search features may be limited');
   }
 
   if (config.ebayAppId) {
     console.log('✅ eBay Finding API configured successfully');
   } else {
-    console.warn('⚠️ eBay App ID not configured - eBay Finding API will be disabled');
+    console.log('⚠️ eBay App ID not configured - eBay Finding API will be disabled');
   }
 
   return config;
@@ -92,7 +94,12 @@ export function loadConfiguration(): AppConfig {
 
 export const config = loadConfiguration();
 
+// Enhanced CORS headers to handle various origins and methods
 export const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-requested-with',
+  'Access-Control-Max-Age': '86400',
+  'Access-Control-Allow-Credentials': 'false',
+  'Content-Type': 'application/json'
 };

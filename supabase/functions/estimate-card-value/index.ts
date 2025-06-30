@@ -56,6 +56,13 @@ serve(async (req) => {
         cardKeywords = await parseCardFromDescription(requestBody.description!, logger);
       }
     } catch (error: any) {
+      logger.error('Card parsing failed', { 
+        operation: 'parseCard', 
+        traceId, 
+        error: error.message 
+      });
+      
+      // Handle specific API errors with user-friendly messages
       if (error.message?.includes('billing') || error.message?.includes('BILLING_NOT_ENABLED')) {
         return new Response(JSON.stringify({
           success: false,
@@ -80,7 +87,16 @@ serve(async (req) => {
         });
       }
       
-      throw error;
+      // For other parsing errors, provide a generic fallback
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Card parsing failed',
+        details: 'Unable to extract card information. Please try using the card description method.',
+        traceId
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     logger.info('Card parsing complete', {
@@ -91,12 +107,36 @@ serve(async (req) => {
       set: cardKeywords.set
     });
 
-    // Use the new centralized scraping function
-    const scrapingResult = await fetchProductionComps(
-      cardKeywords,
-      requestBody.sources,
-      requestBody.compLogic
-    );
+    // Use the centralized scraping function with error handling
+    let scrapingResult;
+    try {
+      scrapingResult = await fetchProductionComps(
+        cardKeywords,
+        requestBody.sources,
+        requestBody.compLogic
+      );
+    } catch (error: any) {
+      logger.error('Scraping failed', { 
+        operation: 'fetchProductionComps', 
+        traceId, 
+        error: error.message 
+      });
+      
+      // Return a partial success response with error information
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Data collection failed',
+        details: 'Unable to collect pricing data from the selected sources. Please try again or select different sources.',
+        traceId,
+        cardInfo: cardKeywords,
+        estimatedValue: null,
+        comps: [],
+        warnings: [`Data collection error: ${error.message}`]
+      }), {
+        status: 200, // Use 200 for partial failures to allow frontend handling
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
     logger.info('Card estimation complete', {
       operation: 'estimate-card-value',
@@ -128,6 +168,13 @@ serve(async (req) => {
     });
 
   } catch (error: any) {
+    logger.error('Unexpected error in main handler', { 
+      operation: 'estimate-card-value', 
+      traceId, 
+      error: error.message,
+      stack: error.stack 
+    });
+    
     return handleError(error, traceId, logger);
   }
 });
