@@ -94,67 +94,63 @@ export async function fetchProductionComps(
     let allComps: NormalizedComp[] = [];
     let allErrors: Array<{ source: string; message: string }> = [];
 
-    // STEP 2: Try Google Discovery (with timeout)
-    logger.info('Phase 1: Google Search Discovery (Optimized)');
-    
-    try {
-      const discoveryPromise = discoverListingsViaGoogle(querySet.primaryQueries, logger, 15);
-      const googleDiscovery = await withTimeout(discoveryPromise, 25000, 'Google Discovery');
+    // STEP 2: Try Google Discovery only if enabled (with timeout)
+    if (config.search.enabled) {
+      logger.info('Phase 1: Google Search Discovery (Optimized)');
       
-      allErrors = [...allErrors, ...googleDiscovery.errors];
-
-      // STEP 3: Process discovered links (limited)
-      if (googleDiscovery.discoveredListings.length > 0) {
-        logger.info(`Phase 2: Direct Link Scraping (${Math.min(googleDiscovery.discoveredListings.length, 8)} URLs)`);
+      try {
+        const discoveryPromise = discoverListingsViaGoogle(querySet.primaryQueries, logger, 15);
+        const googleDiscovery = await withTimeout(discoveryPromise, 25000, 'Google Discovery');
         
-        const directLinkUrls = googleDiscovery.discoveredListings
-          .slice(0, 8) // Limit to prevent timeout
-          .map(listing => listing.url);
-        
-        try {
-          const directLinkPromise = scrapeDirectLinks(directLinkUrls, logger);
-          const directLinkResults = await withTimeout(directLinkPromise, 20000, 'Direct Link Scraping');
-          
-          const directComps: NormalizedComp[] = directLinkResults.results.map(result => ({
-            title: result.title,
-            price: result.price,
-            date: result.date,
-            source: result.source,
-            image: result.image,
-            url: result.url,
-            matchScore: 0.8
-          }));
+        allErrors = [...allErrors, ...googleDiscovery.errors];
 
-          allComps = [...directComps];
-          allErrors = [...allErrors, ...directLinkResults.errors.map(e => ({ source: e.source, message: e.message }))];
+        // STEP 3: Process discovered links (limited)
+        if (googleDiscovery.discoveredListings.length > 0) {
+          logger.info(`Phase 2: Direct Link Scraping (${Math.min(googleDiscovery.discoveredListings.length, 8)} URLs)`);
           
-          logger.info(`Direct link scraping completed: ${directComps.length} comps found`);
-        } catch (directError) {
-          logger.error('Direct link scraping failed', directError);
-          allErrors.push({ source: 'Direct Scraping', message: directError.message });
+          const directLinkUrls = googleDiscovery.discoveredListings
+            .slice(0, 8) // Limit to prevent timeout
+            .map(listing => listing.url);
+          
+          try {
+            const directLinkPromise = scrapeDirectLinks(directLinkUrls, logger);
+            const directLinkResults = await withTimeout(directLinkPromise, 20000, 'Direct Link Scraping');
+            
+            const directComps: NormalizedComp[] = directLinkResults.results.map(result => ({
+              title: result.title,
+              price: result.price,
+              date: result.date,
+              source: result.source,
+              image: result.image,
+              url: result.url,
+              matchScore: 0.8
+            }));
+
+            allComps = [...directComps];
+            allErrors = [...allErrors, ...directLinkResults.errors.map(e => ({ source: e.source, message: e.message }))];
+            
+            logger.info(`Direct link scraping completed: ${directComps.length} comps found`);
+          } catch (directError) {
+            logger.error('Direct link scraping failed', directError);
+            allErrors.push({ source: 'Direct Scraping', message: directError.message });
+          }
         }
+      } catch (discoveryError) {
+        logger.error('Google discovery failed, falling back to traditional scraping', discoveryError);
+        allErrors.push({ source: 'Google Discovery', message: discoveryError.message });
       }
+    }
 
-      // STEP 4: Quick fallback if insufficient results
-      if (allComps.length < 3) {
-        logger.info('Phase 3: Quick fallback to traditional scraping');
-        
-        const fallbackResult = await executeQuickFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
-        allComps = [...allComps, ...fallbackResult.comps];
-        allErrors = [...allErrors, ...fallbackResult.errors];
-      }
-
-    } catch (discoveryError) {
-      logger.error('Google discovery failed, falling back to traditional scraping', discoveryError);
-      allErrors.push({ source: 'Google Discovery', message: discoveryError.message });
+    // STEP 3: Fallback to traditional scraping if insufficient results or search disabled
+    if (allComps.length < 3) {
+      logger.info('Phase 3: Traditional scraping fallback');
       
-      // Emergency fallback
       const fallbackResult = await executeQuickFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
-      allComps = [...fallbackResult.comps];
+      allComps = [...allComps, ...fallbackResult.comps];
       allErrors = [...allErrors, ...fallbackResult.errors];
     }
 
-    // STEP 5: Process and return results
+    // STEP 4: Process and return results
     const result = await processScrapingResults(allComps, allErrors, cardKeywords, compLogic, logger);
     
     const processingTime = Date.now() - startTime;

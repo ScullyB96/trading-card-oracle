@@ -50,7 +50,7 @@ export function loadConfiguration(): AppConfig {
       maxSearchResults: 20
     },
     search: {
-      enabled: true,
+      enabled: false, // Disable by default if no search config
       fallbackToDirectScraping: true,
       maxSearchQueries: 3
     }
@@ -61,8 +61,12 @@ export function loadConfiguration(): AppConfig {
     throw new ConfigurationError('Missing required Supabase configuration');
   }
 
-  if (!config.googleSearchApiKey || !config.googleSearchEngineId) {
-    throw new ConfigurationError('Missing required Google Search configuration');
+  // Enable search only if both API key and engine ID are available
+  if (config.googleSearchApiKey && config.googleSearchEngineId) {
+    config.search.enabled = true;
+    console.log('✅ Google Search API configured successfully - enhanced discovery enabled');
+  } else {
+    console.warn('Google Search API not configured - falling back to direct scraping only');
   }
 
   // Log confirmation for successful configurations instead of warnings
@@ -76,12 +80,6 @@ export function loadConfiguration(): AppConfig {
     console.log('✅ OpenAI API configured successfully');
   } else {
     console.warn('OpenAI API key not configured - AI features may be limited');
-  }
-
-  if (config.googleSearchApiKey) {
-    console.log('✅ Google Search API configured successfully - enhanced discovery enabled');
-  } else {
-    console.warn('Google Search API key not configured - search-driven discovery will be disabled');
   }
 
   return config;
