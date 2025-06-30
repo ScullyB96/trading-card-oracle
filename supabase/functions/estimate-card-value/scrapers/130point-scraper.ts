@@ -34,254 +34,16 @@ class ScrapingDebugger {
     }
     console.log('========================');
   }
-}
 
-export async function fetch130PointComps(searchQuery: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
-  console.log('=== IMPROVED 130POINT SCRAPING ===');
-  console.log('Search query:', searchQuery);
-  
-  try {
-    // Try direct web scraping first since API endpoints are uncertain
-    const searchUrl = `https://130point.com/sales/?search=${encodeURIComponent(searchQuery)}`;
-    console.log('130Point URL:', searchUrl);
-    
-    const response = await rateLimitedFetchWithTimeout(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; CardScraper/1.0)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    const html = await response.text();
-    ScrapingDebugger.logResponse('130Point', response, html);
-    
-    const results = parse130PointHtml(html, searchUrl);
-    
-    if (results.length === 0) {
-      return {
-        results: [],
-        error: {
-          source: '130Point',
-          message: 'No results found in HTML parsing',
-          details: {
-            htmlLength: html.length,
-            hasData: html.includes('sale') || html.includes('auction'),
-            queryInHtml: html.toLowerCase().includes(searchQuery.toLowerCase())
-          }
-        }
-      };
-    }
-    
-    console.log(`130Point scraping found ${results.length} valid results`);
-    return { results };
-    
-  } catch (error) {
-    console.error('130Point scraping failed:', error);
-    return {
-      results: [],
-      error: {
-        source: '130Point',
-        message: error.message,
-        details: { searchQuery }
-      }
-    };
+  static logEndpointResult(endpoint: string, resultCount: number, error?: string) {
+    console.log(`📊 ${endpoint} Results: ${resultCount}${error ? ` (Error: ${error})` : ''}`);
   }
 }
 
-function parse130PointHtml(html: string, searchUrl: string): Point130Result[] {
-  const results: Point130Result[] = [];
-  
-  // Look for common table or card patterns
-  const patterns = [
-    /<tr[^>]*>[\s\S]*?<\/tr>/g,
-    /<div[^>]*class="[^"]*sale[^"]*"[^>]*>[\s\S]*?<\/div>/g,
-    /<div[^>]*class="[^"]*auction[^"]*"[^>]*>[\s\S]*?<\/div>/g,
-    /<div[^>]*class="[^"]*listing[^"]*"[^>]*>[\s\S]*?<\/div>/g
-  ];
-  
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(html)) !== null && results.length < 30) {
-      const itemHtml = match[0];
-      
-      // Extract title and price with multiple patterns
-      const titlePatterns = [
-        />([^<]*(?:Prizm|Rookie|Daniels|Card|RC)[^<]*)</i,
-        /title="([^"]*(?:Prizm|Rookie|Daniels|Card|RC)[^"]*)"/i,
-        /<h[^>]*>([^<]*(?:Prizm|Rookie|Daniels|Card|RC)[^<]*)</i
-      ];
-      
-      const pricePatterns = [
-        /\$([0-9,]+\.?[0-9]*)/,
-        /Price[^$]*\$([0-9,]+\.?[0-9]*)/i,
-        /Sold[^$]*\$([0-9,]+\.?[0-9]*)/i
-      ];
-      
-      let title = '';
-      let price = 0;
-      
-      // Find title
-      for (const titlePattern of titlePatterns) {
-        const titleMatch = itemHtml.match(titlePattern);
-        if (titleMatch && titleMatch[1] && titleMatch[1].trim().length > 5) {
-          title = titleMatch[1].trim();
-          break;
-        }
-      }
-      
-      // Find price
-      for (const pricePattern of pricePatterns) {
-        const priceMatch = itemHtml.match(pricePattern);
-        if (priceMatch && priceMatch[1]) {
-          price = parseFloat(priceMatch[1].replace(/,/g, ''));
-          if (price > 0) break;
-        }
-      }
-      
-      if (title && price > 0 && isValidCard(title, price)) {
-        // Extract date if available
-        const dateMatch = itemHtml.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})|(\d{4}-\d{2}-\d{2})/);
-        let date = new Date().toISOString().split('T')[0];
-        
-        if (dateMatch) {
-          try {
-            const parsedDate = new Date(dateMatch[0]);
-            if (!isNaN(parsedDate.getTime()) && parsedDate.getFullYear() > 2020) {
-              date = parsedDate.toISOString().split('T')[0];
-            }
-          } catch (e) {
-            // Keep default date
-          }
-        }
-        
-        results.push({
-          title,
-          price,
-          date,
-          url: searchUrl,
-          source: '130Point'
-        });
-      }
-    }
-    
-    if (results.length > 0) {
-      console.log(`130Point pattern found ${results.length} results`);
-      break; // Found results with this pattern
-    }
-  }
-  
-  // If no structured results, try simple extraction
-  if (results.length === 0) {
-    console.log('Trying simple 130Point extraction');
-    const simpleResults = parse130PointSimple(html, searchUrl);
-    results.push(...simpleResults);
-  }
-  
-  console.log(`130Point parsing found ${results.length} total results`);
-  return results;
-}
-
-function parse130PointSimple(html: string, searchUrl: string): Point130Result[] {
-  const results: Point130Result[] = [];
-  
-  // Simple approach: find prices and look for nearby titles
-  const priceMatches = html.match(/\$[0-9,]+\.?[0-9]*/g) || [];
-  const uniquePrices = [...new Set(priceMatches)];
-  
-  console.log(`Found ${uniquePrices.length} unique prices in 130Point HTML`);
-  
-  uniquePrices.slice(0, 15).forEach((priceStr, index) => {
-    const price = parseFloat(priceStr.replace(/[$,]/g, ''));
-    if (price > 5 && price < 5000) {
-      // Find the price in HTML and look for context
-      const priceIndex = html.indexOf(priceStr);
-      if (priceIndex > 0) {
-        const contextBefore = html.substring(Math.max(0, priceIndex - 800), priceIndex);
-        const contextAfter = html.substring(priceIndex, Math.min(html.length, priceIndex + 400));
-        
-        // Look for card-related terms in context
-        const titlePatterns = [
-          /(?:Card|Rookie|Prizm|Daniels|RC|PSA|BGS)[^<>]*(?=<|$)/gi,
-          />([^<]*(?:Card|Rookie|Prizm|Daniels|RC)[^<]*)</gi
-        ];
-        
-        let title = '';
-        const combinedContext = contextBefore + contextAfter;
-        
-        for (const pattern of titlePatterns) {
-          const matches = combinedContext.match(pattern);
-          if (matches && matches.length > 0) {
-            // Find the longest meaningful match
-            const bestMatch = matches
-              .map(m => m.replace(/^>/, '').trim())
-              .filter(m => m.length > 10)
-              .sort((a, b) => b.length - a.length)[0];
-            
-            if (bestMatch) {
-              title = bestMatch;
-              break;
-            }
-          }
-        }
-        
-        if (!title) {
-          title = `130Point Card Listing ${index + 1} - ${priceStr}`;
-        }
-        
-        if (isValidCard(title, price)) {
-          results.push({
-            title,
-            price,
-            date: new Date().toISOString().split('T')[0],
-            url: searchUrl,
-            source: '130Point'
-          });
-        }
-      }
-    }
-  });
-  
-  console.log(`Simple 130Point parsing: ${results.length} items`);
-  return results;
-}
-
-// STRICT VALIDATION FUNCTION
-function isValidCard(title: string, price: number): boolean {
-  if (!title || title.length < 8) {
-    return false;
-  }
-  
-  if (!price || price <= 0 || price > 10000) {
-    return false;
-  }
-  
-  // Reject non-card terms
-  const titleLower = title.toLowerCase();
-  const invalidTerms = [
-    'break', 'lot of', 'lots', 'collection', 'bundle', 'mixed',
-    'random', 'mystery', 'pack', 'box', 'case', 'supplies'
-  ];
-  
-  for (const term of invalidTerms) {
-    if (titleLower.includes(term)) {
-      console.log(`Rejecting card with invalid term "${term}": ${title}`);
-      return false;
-    }
-  }
-  
-  return true;
-}
-
-// Rate limiting with timeout
+// Rate limiting with enhanced timeout protection
 let lastRequestTime = 0;
 const MIN_REQUEST_INTERVAL = 1200; // 1.2 seconds between requests
-const REQUEST_TIMEOUT = 8000; // 8 seconds timeout
+const REQUEST_TIMEOUT = 7000; // 7 seconds timeout as requested
 
 async function rateLimitedFetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
   const now = Date.now();
@@ -295,11 +57,417 @@ async function rateLimitedFetchWithTimeout(url: string, options: RequestInit): P
   
   lastRequestTime = Date.now();
   
-  // Wrap fetch with timeout using Promise.race
+  // Enhanced timeout protection with Promise.race
   return Promise.race([
     fetch(url, options),
     new Promise<Response>((_, reject) => 
       setTimeout(() => reject(new Error(`130Point request timeout after ${REQUEST_TIMEOUT}ms`)), REQUEST_TIMEOUT)
     )
   ]);
+}
+
+export async function fetch130PointComps(searchQuery: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
+  console.log('=== HARDENED 130POINT SCRAPING ===');
+  console.log('Search query:', searchQuery);
+  
+  const searchUrl = `https://130point.com/sales/?search=${encodeURIComponent(searchQuery)}`;
+  console.log('130Point URL:', searchUrl);
+  
+  // Strategy 1: Try V2 API endpoint
+  const v2Results = await try130PointV2API(searchQuery, searchUrl);
+  ScrapingDebugger.logEndpointResult('V2 API', v2Results.results.length, v2Results.error?.message);
+  
+  if (v2Results.results.length > 0) {
+    return v2Results;
+  }
+  
+  // Strategy 2: Try V1 API fallback
+  const v1Results = await try130PointV1API(searchQuery, searchUrl);
+  ScrapingDebugger.logEndpointResult('V1 API', v1Results.results.length, v1Results.error?.message);
+  
+  if (v1Results.results.length > 0) {
+    return v1Results;
+  }
+  
+  // Strategy 3: HTML scraping as last resort
+  const htmlResults = await try130PointHTMLScraping(searchQuery, searchUrl);
+  ScrapingDebugger.logEndpointResult('HTML Scraping', htmlResults.results.length, htmlResults.error?.message);
+  
+  if (htmlResults.results.length > 0) {
+    return htmlResults;
+  }
+  
+  // All strategies failed - return structured error
+  console.log('❌ All 130Point strategies failed');
+  return {
+    results: [],
+    error: {
+      source: '130Point',
+      message: 'No results found for this card',
+      details: {
+        searchQuery,
+        strategiesTried: ['V2 API', 'V1 API', 'HTML Scraping'],
+        searchUrl
+      }
+    }
+  };
+}
+
+async function try130PointV2API(searchQuery: string, fallbackUrl: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
+  try {
+    console.log('🔄 Trying 130Point V2 API...');
+    const apiUrl = `https://130point.com/api/v2/search?q=${encodeURIComponent(searchQuery)}&limit=30`;
+    
+    const response = await rateLimitedFetchWithTimeout(apiUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; CardScraper/1.0)',
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`V2 API HTTP ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const results = parse130PointResponse(data, fallbackUrl);
+    
+    console.log(`✅ V2 API returned ${results.length} results`);
+    return { results };
+    
+  } catch (error) {
+    console.log(`❌ V2 API failed: ${error.message}`);
+    return {
+      results: [],
+      error: {
+        source: '130Point V2 API',
+        message: error.message
+      }
+    };
+  }
+}
+
+async function try130PointV1API(searchQuery: string, fallbackUrl: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
+  try {
+    console.log('🔄 Trying 130Point V1 API...');
+    const apiUrl = `https://130point.com/api/search?query=${encodeURIComponent(searchQuery)}`;
+    
+    const response = await rateLimitedFetchWithTimeout(apiUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; CardScraper/1.0)',
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`V1 API HTTP ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const results = parse130PointResponse(data, fallbackUrl);
+    
+    console.log(`✅ V1 API returned ${results.length} results`);
+    return { results };
+    
+  } catch (error) {
+    console.log(`❌ V1 API failed: ${error.message}`);
+    return {
+      results: [],
+      error: {
+        source: '130Point V1 API',
+        message: error.message
+      }
+    };
+  }
+}
+
+async function try130PointHTMLScraping(searchQuery: string, searchUrl: string): Promise<{ results: Point130Result[], error?: Point130Error }> {
+  try {
+    console.log('🔄 Trying 130Point HTML scraping...');
+    
+    const response = await rateLimitedFetchWithTimeout(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; CardScraper/1.0)',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTML scraping HTTP ${response.status}`);
+    }
+    
+    const html = await response.text();
+    ScrapingDebugger.logResponse('130Point HTML', response, html);
+    
+    const results = parse130PointHtml(html, searchUrl);
+    
+    console.log(`✅ HTML scraping returned ${results.length} results`);
+    return { results };
+    
+  } catch (error) {
+    console.log(`❌ HTML scraping failed: ${error.message}`);
+    return {
+      results: [],
+      error: {
+        source: '130Point HTML',
+        message: error.message
+      }
+    };
+  }
+}
+
+function parse130PointResponse(data: any, fallbackUrl: string): Point130Result[] {
+  console.log('🔍 Parsing 130Point API response...');
+  
+  let items: any[] = [];
+  
+  // Handle different API response structures
+  if (Array.isArray(data)) {
+    items = data;
+  } else if (data.results && Array.isArray(data.results)) {
+    items = data.results;
+  } else if (data.data && Array.isArray(data.data)) {
+    items = data.data;
+  } else if (data.sales && Array.isArray(data.sales)) {
+    items = data.sales;
+  }
+  
+  console.log(`📋 Found ${items.length} raw items to validate`);
+  
+  const validResults: Point130Result[] = [];
+  
+  for (const item of items) {
+    if (!item) continue;
+    
+    const title = extractTitle(item);
+    const price = extractPrice(item);
+    const date = extractDate(item);
+    const url = extractUrl(item, fallbackUrl);
+    
+    // Apply strict validation
+    if (isStrictlyValidCard(title, price)) {
+      validResults.push({
+        title,
+        price,
+        date,
+        url,
+        source: '130Point',
+        image: item.image || item.thumbnail
+      });
+    }
+  }
+  
+  // Deduplicate and sort
+  const dedupedResults = deduplicateResults(validResults);
+  const sortedResults = sortResultsByDate(dedupedResults);
+  
+  console.log(`✅ Validation complete: ${items.length} raw → ${validResults.length} valid → ${sortedResults.length} final`);
+  return sortedResults;
+}
+
+function parse130PointHtml(html: string, searchUrl: string): Point130Result[] {
+  console.log('🔍 Parsing 130Point HTML...');
+  
+  const results: Point130Result[] = [];
+  
+  // Enhanced HTML parsing patterns
+  const patterns = [
+    // Table rows
+    /<tr[^>]*>[\s\S]*?<\/tr>/g,
+    // Card/sale divs
+    /<div[^>]*class="[^"]*(?:sale|card|listing|auction)[^"]*"[^>]*>[\s\S]*?<\/div>/g,
+    // Generic containers with price indicators
+    /<div[^>]*>[\s\S]*?\$[0-9,]+\.?[0-9]*[\s\S]*?<\/div>/g
+  ];
+  
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null && results.length < 50) {
+      const itemHtml = match[0];
+      const parsedItem = parseHtmlItem(itemHtml, searchUrl);
+      
+      if (parsedItem && isStrictlyValidCard(parsedItem.title, parsedItem.price)) {
+        results.push(parsedItem);
+      }
+    }
+    
+    if (results.length > 0) {
+      console.log(`🎯 HTML pattern found ${results.length} valid results`);
+      break;
+    }
+  }
+  
+  // Deduplicate and sort
+  const dedupedResults = deduplicateResults(results);
+  const sortedResults = sortResultsByDate(dedupedResults);
+  
+  console.log(`✅ HTML parsing: ${results.length} raw → ${sortedResults.length} final`);
+  return sortedResults;
+}
+
+function parseHtmlItem(itemHtml: string, fallbackUrl: string): Point130Result | null {
+  // Extract title
+  const titlePatterns = [
+    />([^<]*(?:Rookie|RC|Prizm|Daniels|Card)[^<]*)</i,
+    /title="([^"]*(?:Rookie|RC|Prizm|Daniels|Card)[^"]*)"/i,
+    /<h[1-6][^>]*>([^<]*(?:Rookie|RC|Prizm|Daniels|Card)[^<]*)</i
+  ];
+  
+  let title = '';
+  for (const pattern of titlePatterns) {
+    const match = itemHtml.match(pattern);
+    if (match && match[1] && match[1].trim().length >= 10) {
+      title = match[1].trim();
+      break;
+    }
+  }
+  
+  // Extract price
+  const pricePatterns = [
+    /\$([0-9,]+\.?[0-9]*)/,
+    /(?:Price|Sold)[^$]*\$([0-9,]+\.?[0-9]*)/i
+  ];
+  
+  let price = 0;
+  for (const pattern of pricePatterns) {
+    const match = itemHtml.match(pattern);
+    if (match && match[1]) {
+      price = parseFloat(match[1].replace(/[$,]/g, ''));
+      if (price > 0) break;
+    }
+  }
+  
+  if (!title || price <= 0) {
+    return null;
+  }
+  
+  // Extract date
+  const dateMatch = itemHtml.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})|(\d{4}-\d{2}-\d{2})/);
+  let date = new Date().toISOString().split('T')[0];
+  
+  if (dateMatch) {
+    try {
+      const parsedDate = new Date(dateMatch[0]);
+      if (!isNaN(parsedDate.getTime()) && parsedDate.getFullYear() > 2020) {
+        date = parsedDate.toISOString().split('T')[0];
+      }
+    } catch (e) {
+      // Keep default date
+    }
+  }
+  
+  return {
+    title,
+    price,
+    date,
+    url: fallbackUrl, // Always use real 130Point search URL
+    source: '130Point'
+  };
+}
+
+// STRICT VALIDATION - Enhanced as requested
+function isStrictlyValidCard(title: string, price: number): boolean {
+  // Check title length (minimum 10 characters as requested)
+  if (!title || title.length < 10) {
+    console.log(`❌ Rejecting: title too short (${title?.length || 0} chars): "${title}"`);
+    return false;
+  }
+  
+  // Check price validity
+  if (!price || price <= 0 || price > 10000) {
+    console.log(`❌ Rejecting: invalid price (${price}): "${title}"`);
+    return false;
+  }
+  
+  // Reject non-card terms (expanded list)
+  const titleLower = title.toLowerCase();
+  const invalidTerms = [
+    'break', 'breaks', 'lot of', 'lots', 'collection', 'bundle', 'mixed',
+    'random', 'mystery', 'pack', 'packs', 'box', 'boxes', 'case', 'cases', 
+    'supplies', 'hobby box', 'blaster', 'retail', 'factory set'
+  ];
+  
+  for (const term of invalidTerms) {
+    if (titleLower.includes(term)) {
+      console.log(`❌ Rejecting: contains invalid term "${term}": "${title}"`);
+      return false;
+    }
+  }
+  
+  console.log(`✅ Validated card: "${title}" - $${price}`);
+  return true;
+}
+
+// DEDUPLICATION - Enhanced as requested
+function deduplicateResults(results: Point130Result[]): Point130Result[] {
+  console.log(`🔄 Deduplicating ${results.length} results...`);
+  
+  const seen = new Map<string, Point130Result>();
+  
+  for (const result of results) {
+    // Create signature from normalized title + price
+    const normalizedTitle = result.title.toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    const signature = `${normalizedTitle}_${result.price}`;
+    
+    // Keep the most recent result for each signature
+    const existing = seen.get(signature);
+    if (!existing || new Date(result.date) > new Date(existing.date)) {
+      seen.set(signature, result);
+    }
+  }
+  
+  const dedupedResults = Array.from(seen.values());
+  console.log(`✅ Deduplication: ${results.length} → ${dedupedResults.length}`);
+  
+  return dedupedResults;
+}
+
+// SORTING - Sort by date DESC as requested
+function sortResultsByDate(results: Point130Result[]): Point130Result[] {
+  return results.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+// Utility functions for extracting data from API responses
+function extractTitle(item: any): string {
+  return item.title || item.name || item.description || item.card_name || '';
+}
+
+function extractPrice(item: any): number {
+  const price = item.price || item.sale_price || item.final_price || item.amount || 0;
+  return typeof price === 'string' ? parseFloat(price.replace(/[$,]/g, '')) : Number(price) || 0;
+}
+
+function extractDate(item: any): string {
+  const dateStr = item.date || item.sale_date || item.sold_date || item.created_at;
+  
+  if (dateStr) {
+    try {
+      const date = new Date(dateStr);
+      if (!isNaN(date.getTime()) && date.getFullYear() > 2020) {
+        return date.toISOString().split('T')[0];
+      }
+    } catch (e) {
+      // Fall through to default
+    }
+  }
+  
+  return new Date().toISOString().split('T')[0];
+}
+
+function extractUrl(item: any, fallbackUrl: string): string {
+  // NEVER fake URLs - always use real 130Point search URL as requested
+  const itemUrl = item.url || item.link || item.permalink;
+  
+  if (itemUrl && itemUrl.startsWith('http')) {
+    return itemUrl;
+  }
+  
+  // Always return the real 130Point search URL, never fake eBay URLs
+  return fallbackUrl;
 }
