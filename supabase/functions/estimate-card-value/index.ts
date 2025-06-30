@@ -3,10 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { corsHeaders } from './config.ts'
 import { Logger } from './logger.ts'
 import { parseCardFromImage, parseCardFromDescription } from './card-parser.ts'
-import { generateSearchQueries } from './query-generator.ts'
-import { discoverCardListings } from './search-discovery.ts'
-import { scrapeDirectLinks } from './direct-link-scrapers.ts'
-import { calculateCardValue } from './value-calculator.ts'
+import { fetchProductionComps } from './sales-scrapers.ts'
 import { CardEstimationError, handleError } from './errors.ts'
 
 interface EstimationRequest {
@@ -94,97 +91,37 @@ serve(async (req) => {
       set: cardKeywords.set
     });
 
-    // Generate search queries
-    const querySet = generateSearchQueries(cardKeywords, logger);
-    
-    if (querySet.allQueries.length === 0) {
-      throw new CardEstimationError('No valid search queries could be generated', 'QUERY_GENERATION_FAILED', traceId);
-    }
-
-    logger.info('Search queries generated', {
-      operation: 'generateQueries',
-      traceId,
-      queryCount: querySet.allQueries.length
-    });
-
-    // Discover card listings
-    const discoveryResults = await discoverCardListings(querySet, requestBody.sources, logger);
-    
-    logger.info('Discovery phase complete', {
-      operation: 'discoverListings',
-      traceId,
-      totalLinks: discoveryResults.discoveredLinks.length,
-      errors: discoveryResults.errors.length
-    });
-
-    // Scrape direct links for detailed information
-    const scrapingResults = await scrapeDirectLinks(
-      discoveryResults.discoveredLinks,
-      requestBody.sources,
+    // Use the new centralized scraping function
+    const scrapingResult = await fetchProductionComps(
       cardKeywords,
-      logger
+      requestBody.sources,
+      requestBody.compLogic
     );
-
-    logger.info('Scraping phase complete', {
-      operation: 'scrapeLinks',
-      traceId,
-      salesFound: scrapingResults.salesData.length,
-      errors: scrapingResults.errors.length
-    });
-
-    // Calculate estimated value
-    const valueResult = calculateCardValue(
-      scrapingResults.salesData,
-      requestBody.compLogic,
-      logger
-    );
-
-    // Compile final response
-    const response = {
-      success: true,
-      traceId,
-      cardInfo: cardKeywords,
-      estimatedValue: valueResult.estimatedValue,
-      confidence: valueResult.confidence,
-      methodology: valueResult.methodology,
-      comps: scrapingResults.salesData,
-      warnings: [
-        ...discoveryResults.errors.map(e => e.message),
-        ...scrapingResults.errors.map(e => e.message)
-      ].filter(Boolean),
-      exactMatchFound: scrapingResults.salesData.length > 0,
-      matchMessage: scrapingResults.salesData.length > 0 
-        ? `Found ${scrapingResults.salesData.length} comparable sales`
-        : 'No exact matches found, showing similar cards',
-      dataPoints: scrapingResults.salesData.length,
-      priceRange: valueResult.priceRange,
-      productionResponse: {
-        architecture: 'Discover-then-Scrape v2.0',
-        discoveryPhase: {
-          queriesGenerated: querySet.allQueries.length,
-          linksDiscovered: discoveryResults.discoveredLinks.length,
-          sourcesUsed: requestBody.sources
-        },
-        scrapingPhase: {
-          linksProcessed: discoveryResults.discoveredLinks.length,
-          salesExtracted: scrapingResults.salesData.length,
-          processingTime: 'Real-time'
-        },
-        valuationPhase: {
-          logic: requestBody.compLogic,
-          confidence: valueResult.confidence,
-          methodology: valueResult.methodology
-        }
-      }
-    };
 
     logger.info('Card estimation complete', {
       operation: 'estimate-card-value',
       traceId,
-      estimatedValue: valueResult.estimatedValue,
-      compsFound: scrapingResults.salesData.length,
-      success: true
+      estimatedValue: scrapingResult.estimatedValue,
+      compsFound: scrapingResult.comps.length,
+      success: scrapingResult.success
     });
+
+    // Return consistent response structure
+    const response = {
+      success: scrapingResult.success,
+      traceId,
+      cardInfo: cardKeywords,
+      estimatedValue: scrapingResult.estimatedValue,
+      confidence: scrapingResult.confidence,
+      methodology: scrapingResult.methodology,
+      comps: scrapingResult.comps,
+      warnings: scrapingResult.warnings,
+      exactMatchFound: scrapingResult.exactMatchFound,
+      matchMessage: scrapingResult.matchMessage,
+      dataPoints: scrapingResult.dataPoints,
+      priceRange: scrapingResult.priceRange,
+      productionResponse: scrapingResult.productionResponse
+    };
 
     return new Response(JSON.stringify(response), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }

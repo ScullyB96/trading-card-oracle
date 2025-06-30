@@ -1,6 +1,8 @@
+
 import { EbayResult, EbayError } from './ebay-scraper.ts';
 import { Point130Result, Point130Error } from './130point-scraper.ts';
 import { EbayFindingResult, EbayFindingError } from './ebay-finding-scraper.ts';
+import { safeParseFloat, safeParseDateString, normalizeText, isValidUrl } from '../utils.ts';
 
 export interface NormalizedComp {
   title: string;
@@ -27,23 +29,23 @@ export function combineAndNormalizeResults(
   point130Result: { results: Point130Result[], error?: Point130Error },
   ebayFindingResult?: { results: EbayFindingResult[], error?: EbayFindingError }
 ): NormalizationResult {
-  console.log('=== RESILIENT NORMALIZATION PROCESS WITH EBAY FINDING API ===');
+  console.log('=== ENHANCED NORMALIZATION WITH EBAY FINDING API ===');
   console.log(`eBay: ${ebayResult.results?.length || 0} results${ebayResult.error ? ' (with error)' : ''}`);
   console.log(`130Point: ${point130Result.results?.length || 0} results${point130Result.error ? ' (with error)' : ''}`);
   console.log(`eBay Finding: ${ebayFindingResult?.results?.length || 0} results${ebayFindingResult?.error ? ' (with error)' : ''}`);
   
   const errors: ScrapingError[] = [];
   
-  // Safely combine results with error tolerance
+  // Safely combine results with comprehensive error handling
   const allResults = safelyCombineResults(ebayResult, point130Result, ebayFindingResult, errors);
   
-  // Normalize and validate results with comprehensive error handling
+  // Normalize and validate results
   const normalizedResults = safelyNormalizeComps(allResults, errors);
   
-  // Remove duplicates with error tolerance
+  // Remove duplicates
   const dedupedResults = safelyDeduplicateResults(normalizedResults, errors);
   
-  console.log(`✅ Resilient normalization complete with eBay Finding API: ${dedupedResults.length} final comps, ${errors.length} errors collected`);
+  console.log(`✅ Enhanced normalization complete: ${dedupedResults.length} final comps, ${errors.length} errors collected`);
   
   return {
     comps: dedupedResults,
@@ -100,6 +102,7 @@ function safelyCombineResults(
   try {
     if (ebayFindingResult?.results && Array.isArray(ebayFindingResult.results)) {
       allResults.push(...ebayFindingResult.results);
+      console.log(`Added ${ebayFindingResult.results.length} eBay Finding API results`);
     }
     
     if (ebayFindingResult?.error) {
@@ -109,7 +112,7 @@ function safelyCombineResults(
   } catch (error) {
     console.error('Error processing eBay Finding results:', error);
     errors.push({
-      source: 'eBay Finding',
+      source: 'eBay Finding API',
       message: `Failed to process eBay Finding results: ${error.message}`
     });
   }
@@ -136,9 +139,6 @@ function safelyNormalizeComps(resultsArray: (EbayResult | Point130Result | EbayF
     } catch (error) {
       console.error('Failed to normalize individual result:', error, comp);
       skippedCount++;
-      
-      // Don't add to errors array for individual normalization failures
-      // as this would create too much noise
     }
   }
   
@@ -151,7 +151,7 @@ function safelyNormalizeComps(resultsArray: (EbayResult | Point130Result | EbayF
         return new Date(b.date).getTime() - new Date(a.date).getTime();
       } catch (error) {
         console.warn('Date sorting failed for items:', a.title, b.title);
-        return 0; // Keep original order if sorting fails
+        return 0;
       }
     });
   } catch (error) {
@@ -160,7 +160,7 @@ function safelyNormalizeComps(resultsArray: (EbayResult | Point130Result | EbayF
       source: 'Normalizer',
       message: 'Failed to sort results by date'
     });
-    return normalizedResults; // Return unsorted if sorting fails
+    return normalizedResults;
   }
 }
 
@@ -168,11 +168,11 @@ function safelyNormalizeResult(comp: EbayResult | Point130Result | EbayFindingRe
   try {
     // Validate and sanitize title
     const title = sanitizeTitle(comp.title);
-    if (!title || title === 'INVALID') {
+    if (!title) {
       return null;
     }
     
-    // Validate and sanitize price
+    // Validate and sanitize price - reject $0 prices
     const price = sanitizePrice(comp.price);
     if (price <= 0) {
       return null;
@@ -219,13 +219,9 @@ function sanitizeTitle(title: any): string | null {
       return null;
     }
     
-    const cleaned = title
-      .trim()
-      .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-      .replace(/[^\w\s\-#.()]/g, '') // Keep only safe characters
-      .slice(0, 200); // Limit length
+    const cleaned = normalizeText(title);
     
-    // Must have meaningful content
+    // Must have meaningful content (reject titles that are too short)
     if (cleaned.length < 10) {
       return null;
     }
@@ -239,20 +235,10 @@ function sanitizeTitle(title: any): string | null {
 
 function sanitizePrice(price: any): number {
   try {
-    let numPrice: number;
+    const numPrice = safeParseFloat(price);
     
-    if (typeof price === 'string') {
-      // Remove currency symbols and commas
-      const cleanedPrice = price.replace(/[$,]/g, '');
-      numPrice = parseFloat(cleanedPrice);
-    } else if (typeof price === 'number') {
-      numPrice = price;
-    } else {
-      return 0;
-    }
-    
-    // Validate price range
-    if (isNaN(numPrice) || numPrice <= 0 || numPrice > 50000) {
+    // Validate price range - reject $0 and unreasonably high prices
+    if (numPrice <= 0 || numPrice > 50000) {
       return 0;
     }
     
@@ -267,23 +253,15 @@ function sanitizeDate(date: any): string | null {
   try {
     if (!date) return null;
     
-    const dateObj = typeof date === 'string' ? new Date(date) : date;
-    
-    if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) {
-      return null;
+    if (typeof date === 'string') {
+      return safeParseDateString(date);
     }
     
-    // Validate date range (not too far in past or future)
-    const now = new Date();
-    const twoYearsAgo = new Date(now.getFullYear() - 2, now.getMonth(), now.getDate());
-    const oneWeekFuture = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    
-    if (dateObj < twoYearsAgo || dateObj > oneWeekFuture) {
-      console.warn('Date outside reasonable range:', dateObj);
-      return null;
+    if (date instanceof Date) {
+      return safeParseDateString(date.toISOString());
     }
     
-    return dateObj.toISOString().split('T')[0];
+    return null;
   } catch (error) {
     console.error('Date sanitization failed:', error);
     return null;
@@ -296,7 +274,6 @@ function sanitizeUrl(url: any): string | null {
       return null;
     }
     
-    // Must be a valid URL
     if (!isValidUrl(url)) {
       return null;
     }
@@ -314,8 +291,20 @@ function sanitizeSource(source: any): string | null {
       return null;
     }
     
-    const validSources = ['eBay', '130Point'];
-    return validSources.includes(source) ? source : null;
+    // Accept various source types including eBay Finding API
+    const validSources = ['eBay', '130Point', 'eBay Finding API', 'Direct Link'];
+    const normalizedSource = source.trim();
+    
+    // Allow flexible source matching
+    if (normalizedSource.toLowerCase().includes('ebay')) {
+      return source.toLowerCase().includes('finding') ? 'eBay Finding API' : 'eBay';
+    }
+    
+    if (normalizedSource.toLowerCase().includes('130point') || normalizedSource.toLowerCase().includes('130 point')) {
+      return '130Point';
+    }
+    
+    return validSources.includes(normalizedSource) ? normalizedSource : 'Unknown';
   } catch (error) {
     console.error('Source sanitization failed:', error);
     return null;
@@ -335,15 +324,6 @@ function sanitizeImageUrl(image: any): string | undefined {
   }
 }
 
-function isValidUrl(url: string): boolean {
-  try {
-    const parsedUrl = new URL(url);
-    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
 function safelyDeduplicateResults(results: NormalizedComp[], errors: ScrapingError[]): NormalizedComp[] {
   try {
     const seen = new Map<string, NormalizedComp>();
@@ -352,10 +332,8 @@ function safelyDeduplicateResults(results: NormalizedComp[], errors: ScrapingErr
     
     for (const result of results) {
       try {
-        // Create a deduplication key with error handling
         const key = createDuplicationKey(result);
         
-        // Keep the most recent result for each key
         const existing = seen.get(key);
         if (!existing) {
           seen.set(key, result);
@@ -367,20 +345,17 @@ function safelyDeduplicateResults(results: NormalizedComp[], errors: ScrapingErr
             }
             duplicateCount++;
           } catch (dateError) {
-            // If date comparison fails, keep the first one
             duplicateCount++;
           }
         }
       } catch (error) {
         console.error('Failed to process result for deduplication:', error);
-        // Continue processing other results
       }
     }
     
     const dedupedResults = Array.from(seen.values());
     console.log(`✅ Deduplication stats: ${results.length} -> ${dedupedResults.length} (${duplicateCount} duplicates removed)`);
     
-    // Final sort with error handling
     try {
       return dedupedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     } catch (sortError) {
@@ -399,7 +374,6 @@ function safelyDeduplicateResults(results: NormalizedComp[], errors: ScrapingErr
       message: `Deduplication failed: ${error.message}`
     });
     
-    // Return original results if deduplication fails
     return results;
   }
 }
@@ -417,7 +391,6 @@ function createDuplicationKey(result: NormalizedComp): string {
     return `${normalizedTitle}_${priceRange}_${source}`;
   } catch (error) {
     console.error('Failed to create deduplication key:', error);
-    // Fallback key
     return `${result.title || 'unknown'}_${result.price || 0}_${result.source || 'unknown'}_${Math.random()}`;
   }
 }

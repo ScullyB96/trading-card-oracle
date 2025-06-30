@@ -37,35 +37,50 @@ export interface SearchQuery {
 }
 
 export interface ProductionScraperResponse {
-  estimatedValue: string;
-  logicUsed: string;
-  exactMatchFound: boolean;
+  success: boolean;
+  estimatedValue: number;
   confidence: number;
   methodology: string;
-  matchMessage?: string;
   comps: Array<{
+    id: string;
     title: string;
     price: number;
     date: string;
     source: string;
     image?: string;
     url: string;
+    matchScore: number;
   }>;
-  errors: Array<{
-    source: string;
-    message: string;
-  }>;
-  debug?: {
-    attemptedQueries: string[];
-    rawResultCounts: { [key: string]: number };
-    totalProcessingTime: number;
-    traceId: string;
+  warnings: string[];
+  exactMatchFound: boolean;
+  matchMessage: string;
+  dataPoints: number;
+  priceRange: {
+    low: number;
+    high: number;
+  };
+  productionResponse: {
     architecture: string;
+    discoveryPhase: {
+      queriesGenerated: number;
+      linksDiscovered: number;
+      sourcesUsed: string[];
+    };
+    scrapingPhase: {
+      linksProcessed: number;
+      salesExtracted: number;
+      processingTime: string;
+    };
+    valuationPhase: {
+      logic: string;
+      confidence: number;
+      methodology: string;
+    };
   };
 }
 
 // Rate-limited executor for API calls
-const rateLimitedFetch = rateLimitedExecutor(2000); // Increased delay
+const rateLimitedFetch = rateLimitedExecutor(2000);
 
 export async function fetchProductionComps(
   cardKeywords: ExtractedCardKeywords,
@@ -76,140 +91,187 @@ export async function fetchProductionComps(
   const logger = new Logger(traceId);
   const startTime = Date.now();
   
-  logger.info('Starting OPTIMIZED production scraping with eBay Finding API', {
+  logger.info('Starting production scraping with Discover-then-Scrape architecture', {
     operation: 'fetchProductionComps',
     sources,
     compLogic,
     player: cardKeywords.player,
     year: cardKeywords.year,
     set: cardKeywords.set,
-    ebayFindingEnabled: !!config.ebayAppId
+    traceId
   });
 
   try {
-    // STEP 1: Generate optimized search queries (limited count)
+    // STEP 1: Generate optimized search queries
     const querySet = generateSearchQueries(cardKeywords, logger);
     
     if (querySet.allQueries.length === 0) {
       throw new Error('No valid search queries generated');
     }
 
-    let allComps: NormalizedComp[] = [];
-    let allErrors: Array<{ source: string; message: string }> = [];
+    logger.info('Search queries generated', {
+      operation: 'generateQueries',
+      primaryCount: querySet.primaryQueries.length,
+      totalQueries: querySet.allQueries.length,
+      traceId
+    });
 
-    // STEP 2: Try Google Discovery only if enabled (with timeout)
-    if (config.search.enabled) {
-      logger.info('Phase 1: Google Search Discovery (Optimized)');
+    let allComps: NormalizedComp[] = [];
+    let allWarnings: string[] = [];
+    let discoveredLinks = 0;
+    let linksProcessed = 0;
+
+    // STEP 2: Discovery Phase - Use Google Search if enabled
+    if (config.search.enabled && config.googleSearchApiKey && config.googleSearchEngineId) {
+      logger.info('Phase 1: Google Search Discovery');
       
       try {
-        const discoveryPromise = discoverListingsViaGoogle(querySet.primaryQueries, logger, 15);
-        const googleDiscovery = await withTimeout(discoveryPromise, 25000, 'Google Discovery');
+        const discoveryPromise = discoverListingsViaGoogle(
+          querySet.primaryQueries.slice(0, 3), // Use top 3 queries for discovery
+          logger,
+          15 // Max results per query
+        );
         
-        allErrors = [...allErrors, ...googleDiscovery.errors];
+        const googleDiscovery = await withTimeout(discoveryPromise, 25000, 'Google Discovery');
+        discoveredLinks = googleDiscovery.discoveredListings?.length || 0;
+        
+        if (googleDiscovery.errors?.length > 0) {
+          allWarnings.push(...googleDiscovery.errors.map(e => e.message));
+        }
 
-        // STEP 3: Process discovered links (limited)
-        if (googleDiscovery.discoveredListings.length > 0) {
-          logger.info(`Phase 2: Direct Link Scraping (${Math.min(googleDiscovery.discoveredListings.length, 8)} URLs)`);
+        // STEP 3: Direct Link Scraping Phase
+        if (discoveredLinks > 0) {
+          logger.info(`Phase 2: Direct Link Scraping (${discoveredLinks} URLs)`);
           
           const directLinkUrls = googleDiscovery.discoveredListings
-            .slice(0, 8) // Limit to prevent timeout
+            .slice(0, 12) // Limit to first 12 URLs to prevent timeout
             .map(listing => listing.url);
           
           try {
             const directLinkPromise = scrapeDirectLinks(directLinkUrls, logger);
             const directLinkResults = await withTimeout(directLinkPromise, 20000, 'Direct Link Scraping');
             
-            const directComps: NormalizedComp[] = directLinkResults.results.map(result => ({
-              title: result.title,
-              price: result.price,
-              date: result.date,
-              source: result.source,
+            linksProcessed = directLinkUrls.length;
+            
+            // Convert direct link results to normalized comps
+            const directComps: NormalizedComp[] = directLinkResults.results.map((result, index) => ({
+              title: result.title || 'Unknown Title',
+              price: result.price || 0,
+              date: result.date || new Date().toISOString().split('T')[0],
+              source: result.source || 'Direct Link',
               image: result.image,
-              url: result.url,
-              matchScore: 0.8
+              url: result.url || '#',
+              matchScore: 0.8 // High match score for direct discovery
             }));
 
             allComps = [...directComps];
-            allErrors = [...allErrors, ...directLinkResults.errors.map(e => ({ source: e.source, message: e.message }))];
+            
+            if (directLinkResults.errors?.length > 0) {
+              allWarnings.push(...directLinkResults.errors.map(e => `Direct scraping: ${e.message}`));
+            }
             
             logger.info(`Direct link scraping completed: ${directComps.length} comps found`);
           } catch (directError) {
             logger.error('Direct link scraping failed', directError);
-            allErrors.push({ source: 'Direct Scraping', message: directError.message });
+            allWarnings.push(`Direct scraping failed: ${directError.message}`);
           }
         }
       } catch (discoveryError) {
         logger.error('Google discovery failed, falling back to traditional scraping', discoveryError);
-        allErrors.push({ source: 'Google Discovery', message: discoveryError.message });
+        allWarnings.push(`Discovery failed: ${discoveryError.message}`);
       }
     }
 
-    // STEP 3: Fallback to traditional scraping with eBay Finding API integration
+    // STEP 4: Fallback Phase - Traditional scraping if insufficient results
     if (allComps.length < 3) {
-      logger.info('Phase 3: Traditional scraping fallback with eBay Finding API');
+      logger.info('Phase 3: Traditional scraping fallback', {
+        currentComps: allComps.length,
+        needMore: 3 - allComps.length
+      });
       
-      const fallbackResult = await executeEnhancedFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
+      const fallbackResult = await executeFallbackScraping(
+        querySet.primaryQueries.slice(0, 2), // Use top 2 queries for fallback
+        sources,
+        logger
+      );
+      
       allComps = [...allComps, ...fallbackResult.comps];
-      allErrors = [...allErrors, ...fallbackResult.errors];
+      allWarnings = [...allWarnings, ...fallbackResult.warnings];
     }
 
-    // STEP 4: Process and return results
-    const result = await processScrapingResults(allComps, allErrors, cardKeywords, compLogic, logger);
+    // STEP 5: Process and return results
+    const result = await processScrapingResults(
+      allComps,
+      allWarnings,
+      cardKeywords,
+      compLogic,
+      logger
+    );
     
     const processingTime = Date.now() - startTime;
-    logger.performance('OPTIMIZED fetchProductionComps with eBay Finding API completed', processingTime);
+    logger.info('Production scraping completed', {
+      operation: 'fetchProductionComps',
+      totalComps: allComps.length,
+      processingTime,
+      success: true,
+      traceId
+    });
     
     return {
       ...result,
-      debug: {
-        attemptedQueries: querySet.allQueries,
-        rawResultCounts: {
-          totalComps: allComps.length,
-          highConfidenceComps: allComps.filter(c => c.matchScore >= 0.7).length,
-          processedSources: sources.length,
-          ebayFindingEnabled: !!config.ebayAppId
+      productionResponse: {
+        architecture: 'Discover-then-Scrape v2.1',
+        discoveryPhase: {
+          queriesGenerated: querySet.allQueries.length,
+          linksDiscovered: discoveredLinks,
+          sourcesUsed: sources
         },
-        totalProcessingTime: processingTime,
-        traceId,
-        architecture: 'Optimized Discover-then-Scrape v2.1 with eBay Finding API'
+        scrapingPhase: {
+          linksProcessed: linksProcessed,
+          salesExtracted: allComps.length,
+          processingTime: 'Real-time'
+        },
+        valuationPhase: {
+          logic: compLogic,
+          confidence: result.confidence,
+          methodology: result.methodology
+        }
       }
     };
 
   } catch (error) {
     const processingTime = Date.now() - startTime;
-    logger.error('OPTIMIZED production scraping with eBay Finding API failed completely', error, { processingTime });
+    logger.error('Production scraping failed completely', error, { processingTime, traceId });
     
-    return createRobustErrorResponse(
-      'Optimized scraping with eBay Finding API failed',
+    return createErrorResponse(
+      'Production scraping failed',
       compLogic,
       processingTime,
-      [],
-      {},
-      [{ source: 'System', message: `Optimized failure: ${error.message}` }],
+      querySet?.allQueries || [],
+      [{ message: `System error: ${error.message}` }],
       traceId
     );
   }
 }
 
-async function executeEnhancedFallbackScraping(
+async function executeFallbackScraping(
   queries: string[],
   sources: string[],
   logger: Logger
-): Promise<{ comps: NormalizedComp[]; errors: Array<{ source: string; message: string }> }> {
+): Promise<{ comps: NormalizedComp[]; warnings: string[] }> {
   
-  logger.info('Executing enhanced fallback scraping with eBay Finding API', {
-    operation: 'executeEnhancedFallbackScraping',
+  logger.info('Executing fallback scraping', {
+    operation: 'executeFallbackScraping',
     queryCount: queries.length,
-    sources,
-    ebayFindingEnabled: !!config.ebayAppId
+    sources
   });
 
   const comps: NormalizedComp[] = [];
-  const errors: Array<{ source: string; message: string }> = [];
+  const warnings: string[] = [];
 
-  // Only try the first query to avoid timeouts
+  // Use only the first query to avoid timeouts
   const query = queries[0];
-  if (!query) return { comps, errors };
+  if (!query) return { comps, warnings };
 
   try {
     const promises: Promise<any>[] = [];
@@ -218,18 +280,28 @@ async function executeEnhancedFallbackScraping(
     if (sources.includes('ebay')) {
       promises.push(
         rateLimitedFetch(() => 
-          withTimeout(fetchEbayComps(query), 10000, 'eBay quick fallback')
-        ).catch(error => ({ results: [], error: { source: 'eBay Quick', message: error.message } }))
+          withTimeout(fetchEbayComps(query), 12000, 'eBay fallback')
+        ).catch(error => ({ 
+          results: [], 
+          error: { source: 'eBay', message: error.message } 
+        }))
       );
     }
 
-    // eBay Finding API scraping (if enabled and configured)
+    // eBay Finding API scraping (if configured)
     if (sources.includes('ebay') && config.ebayAppId) {
-      logger.info('Adding eBay Finding API to scraping pipeline');
+      logger.info('Adding eBay Finding API to fallback scraping');
       promises.push(
         rateLimitedFetch(() => 
-          withTimeout(scrapeEbayCompletedItems(query, config.ebayAppId, { maxResults: 15 }), 12000, 'eBay Finding API')
-        ).catch(error => ({ results: [], error: { source: 'eBay Finding API', message: error.message } }))
+          withTimeout(
+            scrapeEbayCompletedItems(query, config.ebayAppId, { maxResults: 20 }), 
+            15000, 
+            'eBay Finding API'
+          )
+        ).catch(error => ({ 
+          results: [], 
+          error: { source: 'eBay Finding API', message: error.message } 
+        }))
       );
     }
 
@@ -237,13 +309,17 @@ async function executeEnhancedFallbackScraping(
     if (sources.includes('130point')) {
       promises.push(
         rateLimitedFetch(() => 
-          withTimeout(fetch130PointComps(query), 10000, '130Point quick fallback')
-        ).catch(error => ({ results: [], error: { source: '130Point Quick', message: error.message } }))
+          withTimeout(fetch130PointComps(query), 12000, '130Point fallback')
+        ).catch(error => ({ 
+          results: [], 
+          error: { source: '130Point', message: error.message } 
+        }))
       );
     }
 
     const results = await Promise.all(promises);
     
+    // Process results in order
     let ebayResult = { results: [], error: undefined };
     let ebayFindingResult = { results: [], error: undefined };
     let point130Result = { results: [], error: undefined };
@@ -262,52 +338,59 @@ async function executeEnhancedFallbackScraping(
       point130Result = results[resultIndex++] || { results: [], error: undefined };
     }
 
-    // Collect errors
-    if (ebayResult.error) errors.push(ebayResult.error);
-    if (ebayFindingResult.error) errors.push(ebayFindingResult.error);
-    if (point130Result.error) errors.push(point130Result.error);
+    // Collect warnings from errors
+    if (ebayResult.error) warnings.push(ebayResult.error.message);
+    if (ebayFindingResult.error) warnings.push(ebayFindingResult.error.message);
+    if (point130Result.error) warnings.push(point130Result.error.message);
 
-    // Combine and normalize results including eBay Finding API
-    const normalizedResult = combineAndNormalizeResults(ebayResult, point130Result, ebayFindingResult);
+    // Combine and normalize results
+    const normalizedResult = combineAndNormalizeResults(
+      ebayResult, 
+      point130Result, 
+      ebayFindingResult
+    );
+    
     comps.push(...normalizedResult.comps);
-    errors.push(...normalizedResult.errors);
+    warnings.push(...normalizedResult.errors.map(e => e.message));
 
-    logger.info('Enhanced fallback scraping completed', {
-      operation: 'executeEnhancedFallbackScraping',
-      traditionalEbayResults: ebayResult.results?.length || 0,
+    logger.info('Fallback scraping completed', {
+      operation: 'executeFallbackScraping',
+      ebayResults: ebayResult.results?.length || 0,
       ebayFindingResults: ebayFindingResult.results?.length || 0,
       point130Results: point130Result.results?.length || 0,
       totalComps: comps.length
     });
 
   } catch (error) {
-    logger.error('Enhanced fallback scraping failed', error, { query });
-    errors.push({ source: 'Enhanced Fallback', message: `Query failed: ${error.message}` });
+    logger.error('Fallback scraping failed', error, { query });
+    warnings.push(`Fallback scraping failed: ${error.message}`);
   }
 
-  return { comps, errors };
+  return { comps, warnings };
 }
 
 async function processScrapingResults(
   comps: NormalizedComp[],
-  errors: Array<{ source: string; message: string }>,
+  warnings: string[],
   cardKeywords: ExtractedCardKeywords,
   compLogic: string,
   logger: Logger
-): Promise<Omit<ProductionScraperResponse, 'debug'>> {
+): Promise<Omit<ProductionScraperResponse, 'productionResponse'>> {
   
   if (comps.length === 0) {
-    logger.warn('No comparable sales found in optimized architecture');
+    logger.warn('No comparable sales found');
     
     return {
-      estimatedValue: '$0.00',
-      logicUsed: compLogic,
-      exactMatchFound: false,
+      success: false,
+      estimatedValue: 0,
       confidence: 0,
       methodology: 'No data available',
-      matchMessage: `No comparable sales found for ${cardKeywords.player}${cardKeywords.year !== 'unknown' ? ` ${cardKeywords.year}` : ''}`,
       comps: [],
-      errors
+      warnings: [...warnings, 'No comparable sales found'],
+      exactMatchFound: false,
+      matchMessage: `No comparable sales found for ${cardKeywords.player}${cardKeywords.year !== 'unknown' ? ` ${cardKeywords.year}` : ''}`,
+      dataPoints: 0,
+      priceRange: { low: 0, high: 0 }
     };
   }
 
@@ -321,10 +404,22 @@ async function processScrapingResults(
       sport: cardKeywords.sport
     };
 
-    const matchResult = findRelevantMatches(comps, searchQuery, 0.1); // Lower threshold
+    const matchResult = findRelevantMatches(comps, searchQuery, 0.2); // Reasonable threshold
     const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
 
-    logger.info('Results processed with optimized architecture', {
+    // Generate comp results with proper IDs and match scores
+    const compResults = matchResult.relevantComps.map((comp, index) => ({
+      id: `comp_${Date.now()}_${index}`,
+      title: comp.title || 'Unknown Title',
+      price: comp.price || 0,
+      date: comp.date || new Date().toISOString().split('T')[0],
+      source: comp.source || 'Unknown',
+      image: comp.image,
+      url: comp.url || '#',
+      matchScore: comp.matchScore || 0.5
+    }));
+
+    logger.info('Results processed successfully', {
       operation: 'processScrapingResults',
       totalComps: comps.length,
       relevantComps: matchResult.relevantComps.length,
@@ -333,96 +428,114 @@ async function processScrapingResults(
     });
 
     return {
-      estimatedValue: `$${compingResult.estimatedValue.toFixed(2)}`,
-      logicUsed: compLogic,
-      exactMatchFound: matchResult.exactMatchFound,
+      success: true,
+      estimatedValue: compingResult.estimatedValue,
       confidence: compingResult.confidence,
       methodology: compingResult.methodology,
-      matchMessage: matchResult.matchMessage,
-      comps: matchResult.relevantComps.map(comp => ({
-        title: comp.title || 'Unknown Title',
-        price: comp.price || 0,
-        date: comp.date || new Date().toISOString().split('T')[0],
-        source: comp.source || 'Unknown',
-        image: comp.image,
-        url: comp.url || '#'
-      })),
-      errors
+      comps: compResults,
+      warnings,
+      exactMatchFound: matchResult.exactMatchFound,
+      matchMessage: matchResult.matchMessage || 'Analysis complete',
+      dataPoints: matchResult.relevantComps.length,
+      priceRange: {
+        low: compingResult.priceRange.low,
+        high: compingResult.priceRange.high
+      }
     };
     
   } catch (error) {
-    logger.error('Result processing failed in optimized architecture', error);
+    logger.error('Result processing failed', error);
     
+    // Emergency fallback calculation
     const prices = comps.map(c => c.price).filter(p => p > 0);
     const avgPrice = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
     
+    const fallbackComps = comps.slice(0, 10).map((comp, index) => ({
+      id: `fallback_comp_${Date.now()}_${index}`,
+      title: comp.title || 'Unknown Title',
+      price: comp.price || 0,
+      date: comp.date || new Date().toISOString().split('T')[0],
+      source: comp.source || 'Unknown',
+      image: comp.image,
+      url: comp.url || '#',
+      matchScore: 0.3
+    }));
+    
     return {
-      estimatedValue: `$${avgPrice.toFixed(2)}`,
-      logicUsed: compLogic,
-      exactMatchFound: false,
+      success: true,
+      estimatedValue: avgPrice,
       confidence: 0.3,
       methodology: 'Emergency fallback calculation',
-      matchMessage: 'Processing failed, using basic average',
-      comps: comps.slice(0, 5).map(comp => ({
-        title: comp.title || 'Unknown Title',
-        price: comp.price || 0,
-        date: comp.date || new Date().toISOString().split('T')[0],
-        source: comp.source || 'Unknown',
-        image: comp.image,
-        url: comp.url || '#'
-      })),
-      errors: [
-        ...errors,
-        { source: 'Result Processor', message: `Processing failed: ${error.message}` }
-      ]
+      comps: fallbackComps,
+      warnings: [
+        ...warnings,
+        `Processing failed: ${error.message}. Using basic average calculation.`
+      ],
+      exactMatchFound: false,
+      matchMessage: 'Processing failed, using basic calculation',
+      dataPoints: fallbackComps.length,
+      priceRange: {
+        low: Math.min(...prices.filter(p => p > 0)) || 0,
+        high: Math.max(...prices) || 0
+      }
     };
   }
 }
 
-function createRobustErrorResponse(
+function createErrorResponse(
   message: string,
   compLogic: string,
   processingTime: number,
   attemptedQueries: string[] = [],
-  rawResultCounts: { [key: string]: number } = {},
-  errors: Array<{ source: string; message: string }> = [],
+  errors: Array<{ message: string }> = [],
   traceId: string = generateTraceId()
 ): ProductionScraperResponse {
   return {
-    estimatedValue: '$0.00',
-    logicUsed: compLogic,
-    exactMatchFound: false,
+    success: false,
+    estimatedValue: 0,
     confidence: 0,
     methodology: 'Error occurred - no data processed',
-    matchMessage: message,
     comps: [],
-    errors: errors.length > 0 ? errors : [{
-      source: 'System',
-      message: message
-    }],
-    debug: {
-      attemptedQueries,
-      rawResultCounts,
-      totalProcessingTime: processingTime,
-      traceId,
-      architecture: 'Optimized Discover-then-Scrape v2.1'
+    warnings: errors.map(e => e.message),
+    exactMatchFound: false,
+    matchMessage: message,
+    dataPoints: 0,
+    priceRange: { low: 0, high: 0 },
+    productionResponse: {
+      architecture: 'Discover-then-Scrape v2.1',
+      discoveryPhase: {
+        queriesGenerated: attemptedQueries.length,
+        linksDiscovered: 0,
+        sourcesUsed: []
+      },
+      scrapingPhase: {
+        linksProcessed: 0,
+        salesExtracted: 0,
+        processingTime: `${processingTime}ms`
+      },
+      valuationPhase: {
+        logic: compLogic,
+        confidence: 0,
+        methodology: 'Error occurred'
+      }
     }
   };
 }
 
+// Legacy function for backward compatibility
 export async function fetchRealSalesData(cardKeywords: ExtractedCardKeywords, sources: string[]): Promise<any[]> {
   try {
     const result = await fetchProductionComps(cardKeywords, sources, 'average3');
     
-    return result.comps.map((comp, index) => ({
-      id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
+    return result.comps.map((comp) => ({
+      id: comp.id,
       title: comp.title,
       price: comp.price,
       date: comp.date,
       source: comp.source,
       url: comp.url,
       thumbnail: comp.image,
-      matchScore: 0.5,
+      matchScore: comp.matchScore,
       selected: true
     }));
   } catch (error) {
