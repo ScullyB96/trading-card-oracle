@@ -1,7 +1,12 @@
+
 import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
 import { fetch130PointComps } from './scrapers/130point-scraper.ts';
-import { combineAndNormalizeResults, NormalizedComp, ScrapingError } from './scrapers/normalizer.ts';
+import { combineAndNormalizeResults, NormalizedComp } from './scrapers/normalizer.ts';
 import { findRelevantMatches, calculateCompValue, MatchResult, CompingResult } from './scrapers/matching-logic.ts';
+import { ScrapingError, TimeoutError } from './errors.ts';
+import { withTimeout, generateTraceId, rateLimitedExecutor } from './utils.ts';
+import { config } from './config.ts';
+import { Logger } from './logger.ts';
 
 export interface SalesResult {
   id: string;
@@ -49,347 +54,92 @@ export interface ProductionScraperResponse {
     attemptedQueries: string[];
     rawResultCounts: { [key: string]: number };
     totalProcessingTime: number;
+    traceId: string;
   };
 }
 
-// Global timeout for entire scraping operation
-const TOTAL_SCRAPING_TIMEOUT = 30000; // 30 seconds maximum
-
-export async function fetchRealSalesData(query: SearchQuery, sources: string[]): Promise<SalesResult[]> {
-  console.log('=== FETCHING REAL SALES DATA (TIMEOUT PROTECTED) ===');
-  console.log('Query:', query);
-  console.log('Sources:', sources);
-  
-  const startTime = Date.now();
-  
-  try {
-    // Build focused search queries (limited for speed)
-    const searchQueries = buildFocusedSearchQueries(query);
-    console.log('Built focused search queries:', searchQueries);
-    
-    // Try queries with timeout protection
-    for (const searchQuery of searchQueries) {
-      // Check global timeout
-      if (Date.now() - startTime > TOTAL_SCRAPING_TIMEOUT) {
-        console.warn('Global scraping timeout reached');
-        throw new Error('Scraping timeout - operation took too long');
-      }
-      
-      console.log(`Trying search query: "${searchQuery}"`);
-      
-      // Fetch from real sources in parallel with timeout
-      const fetchWithTimeout = async () => {
-        const fetchPromises: Promise<any>[] = [];
-        
-        if (sources.includes('ebay')) {
-          fetchPromises.push(fetchEbayComps(searchQuery));
-        }
-        
-        if (sources.includes('130point')) {
-          fetchPromises.push(fetch130PointComps(searchQuery));
-        }
-        
-        if (fetchPromises.length === 0) {
-          throw new Error('No valid sources selected');
-        }
-        
-        // Wait for all scrapers to complete with timeout
-        return await Promise.race([
-          Promise.allSettled(fetchPromises),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Source fetch timeout')), 15000)
-          )
-        ]) as PromiseSettledResult<any>[];
-      };
-      
-      const results = await fetchWithTimeout();
-      
-      let ebayResult = { results: [], error: undefined };
-      let point130Result = { results: [], error: undefined };
-      
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          if (sources.includes('ebay') && index === 0) {
-            ebayResult = result.value;
-          }
-          if (sources.includes('130point')) {
-            const point130Index = sources.includes('ebay') ? 1 : 0;
-            if (index === point130Index) {
-              point130Result = result.value;
-            }
-          }
-        } else {
-          console.error(`Source ${sources[index]} failed:`, result.reason?.message || 'Unknown error');
-        }
-      });
-      
-      // Combine and normalize results
-      const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
-      
-      // If we found results with this query, use them
-      if (normalizationResult.comps.length > 0) {
-        // Find relevant matches
-        const matchResult = findRelevantMatches(normalizationResult.comps, query, 0.4);
-        
-        // Convert to SalesResult format for compatibility
-        const salesResults = matchResult.relevantComps.map((comp, index) => ({
-          id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
-          title: comp.title,
-          price: comp.price,
-          date: comp.date,
-          source: comp.source,
-          url: comp.url,
-          thumbnail: comp.image,
-          matchScore: comp.matchScore || 0.5,
-          selected: true
-        }));
-        
-        console.log(`Found ${salesResults.length} relevant sales with query: "${searchQuery}"`);
-        return salesResults;
-      }
-    }
-    
-    // If no queries returned results, throw error
-    throw new Error('No relevant sales data found for any search variation');
-    
-  } catch (error) {
-    console.error('Production scraper error:', error.message);
-    throw new Error(`Real data fetching failed: ${error.message}`);
-  }
-}
+// Rate-limited executor for API calls
+const rateLimitedFetch = rateLimitedExecutor(1200);
 
 export async function fetchProductionComps(
   query: SearchQuery,
   sources: string[],
   compLogic: string
 ): Promise<ProductionScraperResponse> {
-  console.log('=== FETCHING PRODUCTION COMPS (TIMEOUT PROTECTED) ===');
+  const traceId = generateTraceId();
+  const logger = new Logger(traceId);
   const startTime = Date.now();
   
+  logger.info('Starting production scraping', {
+    operation: 'fetchProductionComps',
+    sources,
+    compLogic,
+    query: {
+      player: query.player,
+      year: query.year,
+      set: query.set,
+      sport: query.sport
+    }
+  });
+
   try {
-    // Build focused search queries (limit to 3 for speed)
-    const searchQueries = buildFocusedSearchQueries(query).slice(0, 3);
-    console.log('Focused search queries:', searchQueries);
-    
     // Validate sources
-    const validSources = sources.filter(s => ['ebay', '130point'].includes(s));
+    const validSources = validateSources(sources);
     if (validSources.length === 0) {
-      return createErrorResponse('No valid sources selected', compLogic, startTime, []);
+      throw new ScrapingError('No valid sources selected', 'validation');
     }
+
+    // Build optimized search queries
+    const searchQueries = buildOptimizedSearchQueries(query, logger);
     
-    let allComps: NormalizedComp[] = [];
-    let allErrors: Array<{ source: string; message: string }> = [];
-    const rawResultCounts: { [key: string]: number } = {};
-    const attemptedQueries: string[] = [];
-    
-    // Try each search query with timeout management
-    for (const searchQuery of searchQueries) {
-      // Check global timeout
-      if (Date.now() - startTime > TOTAL_SCRAPING_TIMEOUT) {
-        console.warn('Global timeout reached, stopping scraping');
-        allErrors.push({
-          source: 'System',
-          message: 'Global timeout reached after 30 seconds'
-        });
-        break;
-      }
-      
-      console.log(`Attempting search with: "${searchQuery}"`);
-      attemptedQueries.push(searchQuery);
-      
-      try {
-        // Fetch from real sources with timeout
-        const fetchWithTimeout = async () => {
-          const fetchPromises: Promise<any>[] = [];
-          
-          if (validSources.includes('ebay')) {
-            fetchPromises.push(fetchEbayComps(searchQuery));
-          }
-          
-          if (validSources.includes('130point')) {
-            fetchPromises.push(fetch130PointComps(searchQuery));
-          }
-          
-          return await Promise.race([
-            Promise.allSettled(fetchPromises),
-            new Promise((_, reject) => 
-              setTimeout(() => reject(new Error(`Query timeout after 12 seconds: ${searchQuery}`)), 12000)
-            )
-          ]) as PromiseSettledResult<any>[];
-        };
-        
-        const results = await fetchWithTimeout();
-        
-        let ebayResult = { results: [], error: undefined };
-        let point130Result = { results: [], error: undefined };
-        
-        results.forEach((result, index) => {
-          if (result.status === 'fulfilled') {
-            if (validSources.includes('ebay') && index === 0) {
-              ebayResult = result.value;
-              rawResultCounts[`eBay_${searchQuery}`] = ebayResult.results.length;
-            } else if (validSources.includes('130point')) {
-              const point130Index = validSources.includes('ebay') ? 1 : 0;
-              if (index === point130Index) {
-                point130Result = result.value;
-                rawResultCounts[`130Point_${searchQuery}`] = point130Result.results.length;
-              }
-            }
-          } else {
-            const sourceName = index === 0 ? validSources[0] : validSources[1];
-            const errorMessage = result.reason?.message || 'Unknown error';
-            console.error(`Source ${sourceName} failed:`, errorMessage);
-            
-            const error = {
-              source: sourceName || 'unknown',
-              message: errorMessage
-            };
-            allErrors.push(error);
-            rawResultCounts[`${sourceName}_${searchQuery}`] = 0;
-          }
-        });
-        
-        // Combine and normalize results for this query
-        const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
-        
-        // Add to our collection of all comps
-        allComps = allComps.concat(normalizationResult.comps);
-        allErrors = allErrors.concat(normalizationResult.errors);
-        
-        console.log(`Query "${searchQuery}" yielded ${normalizationResult.comps.length} normalized comps`);
-        
-        // If we found good results, we can stop trying more queries
-        if (normalizationResult.comps.length >= 3) {
-          console.log(`Found sufficient comps (${normalizationResult.comps.length}) with query: "${searchQuery}"`);
-          break;
-        }
-        
-      } catch (error) {
-        console.error(`Query "${searchQuery}" failed:`, error.message);
-        allErrors.push({
-          source: 'System',
-          message: `Query failed: ${error.message}`
-        });
-        
-        // Mark all sources as failed for this query
-        validSources.forEach(source => {
-          rawResultCounts[`${source}_${searchQuery}`] = 0;
-        });
-      }
-    }
+    // Execute scraping with timeout protection
+    const scrapingResult = await withTimeout(
+      executeScrapingStrategy(searchQueries, validSources, logger),
+      config.timeout.scraping,
+      'scraping'
+    );
+
+    // Process and calculate results
+    const result = await processScrapingResults(scrapingResult, query, compLogic, logger);
     
     const processingTime = Date.now() - startTime;
+    logger.performance('fetchProductionComps', processingTime);
     
-    // Check if we have any data at all
-    if (allComps.length === 0) {
-      console.log('=== NO COMPS FOUND - RETURNING STRUCTURED ERROR ===');
-      
-      return createErrorResponse(
-        allErrors.length > 0 
-          ? `All data sources failed: ${allErrors.map(e => `${e.source}: ${e.message}`).join('; ')}`
-          : 'No sales data found for this card across all search variations',
-        compLogic,
-        startTime,
-        attemptedQueries,
-        rawResultCounts,
-        allErrors
-      );
-    }
-    
-    // Remove duplicates
-    const uniqueComps = deduplicateCompsAdvanced(allComps);
-    console.log(`Advanced deduplication: ${allComps.length} -> ${uniqueComps.length} comps`);
-    
-    // Find relevant matches
-    const matchResult = findRelevantMatches(uniqueComps, query, 0.3);
-    
-    // Calculate estimated value
-    const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
-    
-    // Format response with debug info
-    const response: ProductionScraperResponse = {
-      estimatedValue: `$${compingResult.estimatedValue.toFixed(2)}`,
-      logicUsed: compLogic,
-      exactMatchFound: matchResult.exactMatchFound,
-      confidence: compingResult.confidence,
-      methodology: compingResult.methodology,
-      matchMessage: matchResult.matchMessage,
-      comps: matchResult.relevantComps.map(comp => ({
-        title: comp.title,
-        price: comp.price,
-        date: comp.date,
-        source: comp.source,
-        image: comp.image,
-        url: comp.url
-      })),
-      errors: allErrors,
+    return {
+      ...result,
       debug: {
-        attemptedQueries,
-        rawResultCounts,
-        totalProcessingTime: processingTime
+        attemptedQueries: searchQueries,
+        rawResultCounts: scrapingResult.rawResultCounts,
+        totalProcessingTime: processingTime,
+        traceId
       }
     };
-    
-    console.log('=== PRODUCTION SCRAPER COMPLETE ===');
-    console.log('Final response:', {
-      estimatedValue: response.estimatedValue,
-      exactMatchFound: response.exactMatchFound,
-      compsCount: response.comps.length,
-      errorsCount: response.errors.length,
-      processingTime: processingTime
-    });
-    
-    return response;
-    
+
   } catch (error) {
-    console.error('Production comps error:', error.message);
+    const processingTime = Date.now() - startTime;
+    logger.error('Production scraping failed', error, { processingTime });
     
     return createErrorResponse(
-      `Error: ${error.message}`,
+      error instanceof ScrapingError ? error.message : 'Scraping operation failed',
       compLogic,
-      startTime,
+      processingTime,
       [],
       {},
-      [{ source: 'System', message: error.message }]
+      [{ source: 'System', message: error.message }],
+      traceId
     );
   }
 }
 
-// Helper function to create consistent error responses
-function createErrorResponse(
-  message: string,
-  compLogic: string,
-  startTime: number,
-  attemptedQueries: string[] = [],
-  rawResultCounts: { [key: string]: number } = {},
-  allErrors: Array<{ source: string; message: string }> = []
-): ProductionScraperResponse {
-  return {
-    estimatedValue: '$0.00',
-    logicUsed: compLogic,
-    exactMatchFound: false,
-    confidence: 0,
-    methodology: 'No data available',
-    matchMessage: message,
-    comps: [],
-    errors: allErrors.length > 0 ? allErrors : [{
-      source: 'System',
-      message: message
-    }],
-    debug: {
-      attemptedQueries,
-      rawResultCounts,
-      totalProcessingTime: Date.now() - startTime
-    }
-  };
+function validateSources(sources: string[]): string[] {
+  const validSourceList = ['ebay', '130point'];
+  return sources.filter(s => validSourceList.includes(s));
 }
 
-function buildFocusedSearchQueries(query: SearchQuery): string[] {
-  console.log('=== BUILDING FOCUSED SEARCH QUERIES (SPEED OPTIMIZED) ===');
+function buildOptimizedSearchQueries(query: SearchQuery, logger: Logger): string[] {
+  logger.info('Building optimized search queries', { operation: 'buildOptimizedSearchQueries' });
   
   const queries: string[] = [];
-  
-  // Normalize and extract parts
   const parts = {
     year: query.year && query.year !== 'unknown' ? query.year.trim() : '',
     player: query.player && query.player !== 'unknown' ? query.player.trim() : '',
@@ -398,88 +148,292 @@ function buildFocusedSearchQueries(query: SearchQuery): string[] {
     grade: query.grade && query.grade !== 'unknown' ? query.grade.trim() : '',
     sport: query.sport && query.sport !== 'unknown' && query.sport !== 'other' ? query.sport.trim() : ''
   };
-  
-  console.log('Extracted parts:', parts);
-  
-  // Strategy 1: Most specific search (if we have comprehensive info)
+
+  // High-precision search (full details)
   if (parts.year && parts.player && parts.set && parts.cardNumber) {
     queries.push(`${parts.year} ${parts.set} ${parts.player} #${parts.cardNumber}`);
   }
-  
-  // Strategy 2: Core search without card number
+
+  // Medium-precision search (no card number)
   if (parts.year && parts.player && parts.set) {
     queries.push(`${parts.year} ${parts.set} ${parts.player} Rookie`);
   }
-  
-  // Strategy 3: Player-focused search
+
+  // Player-focused search
   if (parts.player && parts.year) {
     queries.push(`${parts.player} ${parts.year} Prizm RC`);
   }
-  
-  // Strategy 4: Specific fallback for known case
-  if (parts.player === 'Jayden Daniels') {
-    queries.push('Jayden Daniels 2024 Prizm Silver RC');
+
+  // Fallback search
+  if (parts.player) {
+    queries.push(`${parts.player} Rookie Card`);
   }
-  
-  // Remove duplicates and filter quality - limit to 4 for speed
-  const uniqueQueries = [...new Set(queries)]
+
+  const optimizedQueries = queries
     .filter(q => q.length > 8)
     .filter(q => !q.includes('unknown'))
-    .slice(0, 4); // Limit to 4 queries maximum
-  
-  console.log(`Built ${uniqueQueries.length} focused search queries:`, uniqueQueries);
-  return uniqueQueries;
+    .slice(0, config.limits.maxQueries);
+
+  logger.info('Search queries built', { 
+    operation: 'buildOptimizedSearchQueries',
+    queryCount: optimizedQueries.length,
+    queries: optimizedQueries
+  });
+
+  return optimizedQueries;
 }
 
-function deduplicateCompsAdvanced(comps: NormalizedComp[]): NormalizedComp[] {
-  console.log('=== ADVANCED COMP DEDUPLICATION ===');
+interface ScrapingResult {
+  comps: NormalizedComp[];
+  errors: Array<{ source: string; message: string }>;
+  rawResultCounts: { [key: string]: number };
+}
+
+async function executeScrapingStrategy(
+  searchQueries: string[],
+  validSources: string[],
+  logger: Logger
+): Promise<ScrapingResult> {
+  logger.info('Executing scraping strategy', { 
+    operation: 'executeScrapingStrategy',
+    queryCount: searchQueries.length,
+    sources: validSources
+  });
+
+  let allComps: NormalizedComp[] = [];
+  let allErrors: Array<{ source: string; message: string }> = [];
+  const rawResultCounts: { [key: string]: number } = {};
+
+  for (const searchQuery of searchQueries) {
+    try {
+      const queryResult = await processSearchQuery(searchQuery, validSources, logger);
+      
+      allComps = allComps.concat(queryResult.comps);
+      allErrors = allErrors.concat(queryResult.errors);
+      Object.assign(rawResultCounts, queryResult.rawResultCounts);
+      
+      // Early exit if we have sufficient data
+      if (allComps.length >= 5) {
+        logger.info('Sufficient data found, stopping search', {
+          operation: 'executeScrapingStrategy',
+          compCount: allComps.length,
+          query: searchQuery
+        });
+        break;
+      }
+      
+    } catch (error) {
+      logger.error('Search query failed', error, { 
+        operation: 'executeScrapingStrategy',
+        query: searchQuery
+      });
+      
+      allErrors.push({
+        source: 'System',
+        message: `Query failed: ${error.message}`
+      });
+    }
+  }
+
+  // Deduplicate results
+  const uniqueComps = deduplicateComps(allComps, logger);
   
+  return {
+    comps: uniqueComps,
+    errors: allErrors,
+    rawResultCounts
+  };
+}
+
+async function processSearchQuery(
+  searchQuery: string,
+  validSources: string[],
+  logger: Logger
+): Promise<ScrapingResult> {
+  const fetchPromises: Promise<any>[] = [];
+  
+  if (validSources.includes('ebay')) {
+    fetchPromises.push(
+      rateLimitedFetch(() => fetchEbayComps(searchQuery))
+        .catch(error => ({ results: [], error: { source: 'eBay', message: error.message } }))
+    );
+  }
+  
+  if (validSources.includes('130point')) {
+    fetchPromises.push(
+      rateLimitedFetch(() => fetch130PointComps(searchQuery))
+        .catch(error => ({ results: [], error: { source: '130Point', message: error.message } }))
+    );
+  }
+
+  const results = await Promise.allSettled(fetchPromises);
+  
+  let ebayResult = { results: [], error: undefined };
+  let point130Result = { results: [], error: undefined };
+  
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      if (validSources.includes('ebay') && index === 0) {
+        ebayResult = result.value;
+      } else if (validSources.includes('130point')) {
+        const point130Index = validSources.includes('ebay') ? 1 : 0;
+        if (index === point130Index) {
+          point130Result = result.value;
+        }
+      }
+    }
+  });
+
+  const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+  
+  return {
+    comps: normalizationResult.comps,
+    errors: normalizationResult.errors,
+    rawResultCounts: {
+      [`eBay_${searchQuery}`]: ebayResult.results.length,
+      [`130Point_${searchQuery}`]: point130Result.results.length
+    }
+  };
+}
+
+function deduplicateComps(comps: NormalizedComp[], logger: Logger): NormalizedComp[] {
   const seen = new Map<string, NormalizedComp>();
   
   for (const comp of comps) {
-    // Create advanced signature for better deduplication
-    const titleNormalized = comp.title.toLowerCase()
-      .replace(/[^\w\s]/g, ' ') // Remove special chars
-      .replace(/\s+/g, ' ') // Normalize spaces
-      .trim();
-    
-    const titleWords = titleNormalized.split(' ')
-      .filter(word => word.length > 2) // Remove short words
-      .sort() // Sort for consistent comparison
-      .slice(0, 6); // Use first 6 meaningful words
-    
-    const priceGroup = Math.floor(comp.price / 10) * 10; // Group prices in $10 buckets
-    const signature = `${titleWords.join('')}_${priceGroup}_${comp.source}`;
-    
-    // Keep the most recent result for each signature
+    const signature = createCompSignature(comp);
     const existing = seen.get(signature);
+    
     if (!existing || new Date(comp.date) > new Date(existing.date)) {
       seen.set(signature, comp);
     }
   }
   
-  const dedupedResults = Array.from(seen.values());
-  console.log(`Advanced deduplication: ${comps.length} -> ${dedupedResults.length} results`);
+  const dedupedResults = Array.from(seen.values())
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   
-  // Sort by date descending (most recent first)
-  return dedupedResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  logger.info('Deduplication complete', {
+    operation: 'deduplicateComps',
+    originalCount: comps.length,
+    dedupedCount: dedupedResults.length
+  });
+  
+  return dedupedResults;
 }
 
-function buildSearchQuery(query: SearchQuery): string {
-  const parts = [
-    query.player,
-    query.year,
-    query.set,
-    query.cardNumber,
-    query.grade,
-    query.sport
-  ].filter(part => part && part !== 'unknown' && part.trim() !== '');
+function createCompSignature(comp: NormalizedComp): string {
+  const normalizedTitle = comp.title.toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   
-  const searchQuery = parts.join(' ').trim();
+  const titleWords = normalizedTitle.split(' ')
+    .filter(word => word.length > 2)
+    .sort()
+    .slice(0, 6);
   
-  if (!searchQuery) {
-    throw new Error('No valid search terms found in query');
+  const priceGroup = Math.floor(comp.price / 10) * 10;
+  return `${titleWords.join('')}_${priceGroup}_${comp.source}`;
+}
+
+async function processScrapingResults(
+  scrapingResult: ScrapingResult,
+  query: SearchQuery,
+  compLogic: string,
+  logger: Logger
+): Promise<Omit<ProductionScraperResponse, 'debug'>> {
+  if (scrapingResult.comps.length === 0) {
+    logger.warn('No comparable sales found', { operation: 'processScrapingResults' });
+    
+    return {
+      estimatedValue: '$0.00',
+      logicUsed: compLogic,
+      exactMatchFound: false,
+      confidence: 0,
+      methodology: 'No data available',
+      matchMessage: 'No comparable sales found for this card',
+      comps: [],
+      errors: scrapingResult.errors.length > 0 ? scrapingResult.errors : [{
+        source: 'System',
+        message: 'No sales data found for this card across all search variations'
+      }]
+    };
   }
+
+  // Find relevant matches
+  const matchResult = findRelevantMatches(scrapingResult.comps, query, 0.3);
   
-  return searchQuery;
+  // Calculate estimated value
+  const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
+  
+  logger.info('Results processed successfully', {
+    operation: 'processScrapingResults',
+    compCount: matchResult.relevantComps.length,
+    exactMatch: matchResult.exactMatchFound,
+    estimatedValue: compingResult.estimatedValue
+  });
+
+  return {
+    estimatedValue: `$${compingResult.estimatedValue.toFixed(2)}`,
+    logicUsed: compLogic,
+    exactMatchFound: matchResult.exactMatchFound,
+    confidence: compingResult.confidence,
+    methodology: compingResult.methodology,
+    matchMessage: matchResult.matchMessage,
+    comps: matchResult.relevantComps.map(comp => ({
+      title: comp.title,
+      price: comp.price,
+      date: comp.date,
+      source: comp.source,
+      image: comp.image,
+      url: comp.url
+    })),
+    errors: scrapingResult.errors
+  };
+}
+
+function createErrorResponse(
+  message: string,
+  compLogic: string,
+  processingTime: number,
+  attemptedQueries: string[] = [],
+  rawResultCounts: { [key: string]: number } = {},
+  errors: Array<{ source: string; message: string }> = [],
+  traceId: string = generateTraceId()
+): ProductionScraperResponse {
+  return {
+    estimatedValue: '$0.00',
+    logicUsed: compLogic,
+    exactMatchFound: false,
+    confidence: 0,
+    methodology: 'Error occurred',
+    matchMessage: message,
+    comps: [],
+    errors: errors.length > 0 ? errors : [{
+      source: 'System',
+      message: message
+    }],
+    debug: {
+      attemptedQueries,
+      rawResultCounts,
+      totalProcessingTime: processingTime,
+      traceId
+    }
+  };
+}
+
+// Legacy function for backward compatibility
+export async function fetchRealSalesData(query: SearchQuery, sources: string[]): Promise<SalesResult[]> {
+  const result = await fetchProductionComps(query, sources, 'average3');
+  
+  return result.comps.map((comp, index) => ({
+    id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
+    title: comp.title,
+    price: comp.price,
+    date: comp.date,
+    source: comp.source,
+    url: comp.url,
+    thumbnail: comp.image,
+    matchScore: 0.5,
+    selected: true
+  }));
 }

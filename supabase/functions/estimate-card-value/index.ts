@@ -3,18 +3,24 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
 import { extractCardInfoFromImage, parseCardDescription, ExtractedCardInfo } from './vision-parser.ts';
-import { fetchRealSalesData, fetchProductionComps, SalesResult, SearchQuery, ProductionScraperResponse } from './sales-scrapers.ts';
-import { calculateEstimatedValue, validatePriceConsistency, CalculationResult } from './value-calculator.ts';
+import { fetchProductionComps, SearchQuery, ProductionScraperResponse } from './sales-scrapers.ts';
+import { 
+  CardProcessingError, 
+  ImageParsingError, 
+  ValidationError, 
+  ConfigurationError,
+  TimeoutError 
+} from './errors.ts';
+import { config } from './config.ts';
+import { Logger } from './logger.ts';
+import { generateTraceId, withTimeout } from './utils.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const supabase = createClient(
-  Deno.env.get('SUPABASE_URL') ?? '',
-  Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-);
+const supabase = createClient(config.supabaseUrl, config.supabaseAnonKey);
 
 interface EstimationRequest {
   image?: string;
@@ -27,7 +33,7 @@ interface EstimationRequest {
 interface EstimationResponse {
   success: boolean;
   cardInfo?: ExtractedCardInfo;
-  salesResults?: SalesResult[];
+  salesResults?: any[];
   estimatedValue?: number;
   confidence?: number;
   methodology?: string;
@@ -53,204 +59,275 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const traceId = generateTraceId();
+  const logger = new Logger(traceId);
   const startTime = Date.now();
   
   try {
-    console.log('=== PRODUCTION CARD ESTIMATION START ===');
-    console.log('Request method:', req.method);
+    logger.info('Card estimation request started', {
+      operation: 'estimate-card-value',
+      method: req.method
+    });
 
+    // Parse and validate request
+    const requestData = await parseRequest(req, logger);
+    
+    // Extract card information
+    const cardInfo = await extractCardInformation(requestData, logger);
+    
+    // Build search query
+    const searchQuery = buildSearchQuery(cardInfo, logger);
+    
+    // Fetch comparable sales data
+    const productionResponse = await withTimeout(
+      fetchProductionComps(searchQuery, requestData.sources, requestData.compLogic),
+      config.timeout.total,
+      'total-estimation'
+    );
+    
+    // Build final response
+    const response = buildSuccessResponse(cardInfo, productionResponse, requestData, traceId);
+    
+    const processingTime = Date.now() - startTime;
+    logger.performance('estimate-card-value', processingTime);
+    
+    return new Response(JSON.stringify(response), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
+  } catch (error) {
+    const processingTime = Date.now() - startTime;
+    logger.error('Request processing failed', error, { processingTime });
+    
+    return handleError(error, traceId, processingTime);
+  }
+});
+
+async function parseRequest(req: Request, logger: Logger): Promise<EstimationRequest> {
+  logger.info('Parsing request', { operation: 'parseRequest' });
+  
+  try {
     const requestData: EstimationRequest = await req.json();
-    console.log('=== RECEIVED PAYLOAD ===');
-    console.log('Payload summary:', {
+    
+    logger.info('Request parsed successfully', {
+      operation: 'parseRequest',
       hasImage: !!requestData.image,
       hasDescription: !!requestData.description,
-      descriptionLength: requestData.description?.length || 0,
       sources: requestData.sources,
-      compLogic: requestData.compLogic,
-      useProductionScrapers: requestData.useProductionScrapers,
-      imageDataLength: requestData.image?.length || 0
+      compLogic: requestData.compLogic
     });
 
     // Input validation
     if (!requestData.sources || requestData.sources.length === 0) {
-      return errorResponse('No data sources selected', 'Please select at least one data source', 400);
+      throw new ValidationError('No data sources selected', 'sources');
     }
 
     // Validate sources
     const validSources = requestData.sources.filter(s => ['ebay', '130point'].includes(s));
     if (validSources.length === 0) {
-      return errorResponse('Invalid data sources', 'Please select valid data sources (ebay, 130point)', 400);
+      throw new ValidationError('Invalid data sources selected', 'sources');
     }
 
     if (!requestData.image && !requestData.description?.trim()) {
-      return errorResponse('No input provided', 'Please provide either an image or a card description', 400);
+      throw new ValidationError('No input provided', 'input');
     }
 
-    const warnings: string[] = [];
+    return {
+      ...requestData,
+      sources: validSources
+    };
+
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      throw error;
+    }
+    throw new ValidationError('Invalid request format', 'request');
+  }
+}
+
+async function extractCardInformation(
+  requestData: EstimationRequest, 
+  logger: Logger
+): Promise<ExtractedCardInfo> {
+  logger.info('Starting card information extraction', { 
+    operation: 'extractCardInformation',
+    method: requestData.image ? 'image' : 'description'
+  });
+
+  try {
     let cardInfo: ExtractedCardInfo;
 
-    // STEP 1: Extract/Parse Card Information
-    console.log('=== STEP 1: CARD INFORMATION EXTRACTION ===');
-    try {
-      if (requestData.image) {
-        console.log('Processing image with Vision API');
-        cardInfo = await extractCardInfoFromImage(requestData.image);
-        console.log('Extracted card info:', cardInfo);
-        
-        if (cardInfo.confidence < 0.6) {
-          warnings.push(`Low confidence in image parsing (${Math.round(cardInfo.confidence * 100)}%). Results may be less accurate.`);
-        }
-      } else {
-        console.log('Processing text description');
-        cardInfo = await parseCardDescription(requestData.description!.trim());
-        console.log('Parsed card info:', cardInfo);
-      }
-      
-      if (!cardInfo.player || cardInfo.player === 'unknown' || cardInfo.player === 'Unknown') {
-        return errorResponse('Could not identify player', 'Unable to extract player name from input. Please try a clearer image or more detailed description.', 400);
-      }
-      
-    } catch (error) {
-      console.error('Card parsing failed:', error);
-      return handleParsingError(error);
+    if (requestData.image) {
+      logger.info('Processing image with Vision API', { operation: 'extractCardInformation' });
+      cardInfo = await extractCardInfoFromImage(requestData.image);
+    } else {
+      logger.info('Processing text description', { operation: 'extractCardInformation' });
+      cardInfo = await parseCardDescription(requestData.description!.trim());
     }
 
-    const searchQuery: SearchQuery = {
+    // Validate extracted card information
+    if (!cardInfo.player || cardInfo.player === 'unknown' || cardInfo.player === 'Unknown') {
+      throw new ImageParsingError('Could not identify player from input');
+    }
+
+    logger.info('Card information extracted successfully', {
+      operation: 'extractCardInformation',
       player: cardInfo.player,
       year: cardInfo.year,
       set: cardInfo.set,
-      cardNumber: cardInfo.cardNumber,
-      grade: cardInfo.grade,
-      sport: cardInfo.sport
-    };
+      confidence: cardInfo.confidence
+    });
 
-    // STEP 2: Use Production Scrapers (Real Data Only)
-    console.log('=== STEP 2: PRODUCTION SCRAPING (REAL DATA ONLY) ===');
-    
-    try {
-      const productionResponse = await fetchProductionComps(
-        searchQuery,
-        validSources,
-        requestData.compLogic
-      );
-      
-      const processingTime = Date.now() - startTime;
-      console.log(`=== PRODUCTION PROCESSING COMPLETE in ${processingTime}ms ===`);
-      
-      // Add warnings based on match quality and errors
-      if (!productionResponse.exactMatchFound) {
-        warnings.push(productionResponse.matchMessage || 'No exact matches found');
-      }
-      
-      if (productionResponse.confidence < 0.5) {
-        warnings.push('Lower confidence estimate due to limited matching data');
-      }
-      
-      // Add source-specific error warnings
-      if (productionResponse.errors && productionResponse.errors.length > 0) {
-        productionResponse.errors.forEach(error => {
-          warnings.push(`${error.source} error: ${error.message}`);
-        });
-      }
-      
-      const response: EstimationResponse = {
-        success: true,
-        cardInfo,
-        estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
-        confidence: productionResponse.confidence,
-        methodology: productionResponse.methodology,
-        dataPoints: productionResponse.comps.length,
-        logicUsed: requestData.compLogic,
-        exactMatchFound: productionResponse.exactMatchFound,
-        matchMessage: productionResponse.matchMessage,
-        productionResponse,
-        errors: productionResponse.errors,
-        warnings: warnings.length > 0 ? warnings : undefined
-      };
-
-      return new Response(
-        JSON.stringify(response),
-        {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
-      
-    } catch (error) {
-      console.error('Production scraper failed:', error);
-      return errorResponse(
-        'Data scraping failed', 
-        `Failed to fetch real sales data: ${error.message}`, 
-        500, 
-        'scraping-error'
-      );
-    }
+    return cardInfo;
 
   } catch (error) {
-    console.error('=== UNHANDLED ERROR ===');
-    console.error('Error type:', error.constructor.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
+    logger.error('Card information extraction failed', error, { operation: 'extractCardInformation' });
     
-    return errorResponse('Unexpected error occurred', error.message, 500, 'unhandled-error');
-  }
-});
+    if (error instanceof ImageParsingError) {
+      throw error;
+    }
+    
+    // Transform known error types
+    if (error.message.includes('Could not extract sufficient text from image')) {
+      throw new ImageParsingError('Image quality too poor for text extraction');
+    }
+    
+    if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
+      throw new ConfigurationError('Google Vision API billing not enabled');
+    }
+    
+    if (error.message.includes('Cloud Vision API has not been used') || error.message.includes('SERVICE_DISABLED')) {
+      throw new ConfigurationError('Google Vision API not enabled');
+    }
+    
+    if (error.message.includes('insufficient_quota') || error.message.includes('exceeded your current quota')) {
+      throw new ConfigurationError('OpenAI API quota exceeded');
+    }
 
-function errorResponse(error: string, details: string, status: number, traceId?: string): Response {
+    throw new ImageParsingError('Failed to extract card information', error.message);
+  }
+}
+
+function buildSearchQuery(cardInfo: ExtractedCardInfo, logger: Logger): SearchQuery {
+  logger.info('Building search query', { operation: 'buildSearchQuery' });
+  
+  const searchQuery: SearchQuery = {
+    player: cardInfo.player,
+    year: cardInfo.year,
+    set: cardInfo.set,
+    cardNumber: cardInfo.cardNumber,
+    grade: cardInfo.grade,
+    sport: cardInfo.sport
+  };
+
+  logger.info('Search query built', {
+    operation: 'buildSearchQuery',
+    query: searchQuery
+  });
+
+  return searchQuery;
+}
+
+function buildSuccessResponse(
+  cardInfo: ExtractedCardInfo,
+  productionResponse: ProductionScraperResponse,
+  requestData: EstimationRequest,
+  traceId: string
+): EstimationResponse {
+  const warnings: string[] = [];
+  
+  // Add warnings based on match quality and errors
+  if (!productionResponse.exactMatchFound) {
+    warnings.push(productionResponse.matchMessage || 'No exact matches found');
+  }
+  
+  if (productionResponse.confidence < 0.5) {
+    warnings.push('Lower confidence estimate due to limited matching data');
+  }
+  
+  // Add source-specific error warnings
+  if (productionResponse.errors && productionResponse.errors.length > 0) {
+    productionResponse.errors.forEach(error => {
+      warnings.push(`${error.source} error: ${error.message}`);
+    });
+  }
+  
+  return {
+    success: true,
+    cardInfo,
+    estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
+    confidence: productionResponse.confidence,
+    methodology: productionResponse.methodology,
+    dataPoints: productionResponse.comps.length,
+    logicUsed: requestData.compLogic,
+    exactMatchFound: productionResponse.exactMatchFound,
+    matchMessage: productionResponse.matchMessage,
+    productionResponse,
+    errors: productionResponse.errors,
+    warnings: warnings.length > 0 ? warnings : undefined,
+    traceId
+  };
+}
+
+function handleError(error: Error, traceId: string, processingTime: number): Response {
+  let statusCode = 500;
+  let errorTitle = 'Unexpected error occurred';
+  let errorDetails = error.message;
+  let errorCode = 'unhandled-error';
+
+  if (error instanceof CardProcessingError) {
+    statusCode = error.statusCode;
+    errorCode = error.code;
+    
+    switch (error.name) {
+      case 'ValidationError':
+        errorTitle = 'Invalid request';
+        break;
+      case 'ImageParsingError':
+        errorTitle = 'Image processing failed';
+        if (error.message.includes('Image quality too poor')) {
+          errorDetails = 'The image quality is too poor for text extraction. Please try a clearer image or use the "Describe Card" tab instead.';
+          errorCode = 'poor-image-quality';
+        }
+        break;
+      case 'ConfigurationError':
+        errorTitle = 'Configuration error';
+        if (error.message.includes('Google Vision API billing')) {
+          errorDetails = 'The Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project or use the "Describe Card" tab instead.';
+          errorCode = 'billing-disabled';
+        } else if (error.message.includes('Google Vision API not enabled')) {
+          errorDetails = 'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it or use the card description option instead.';
+          errorCode = 'vision-api-disabled';
+        } else if (error.message.includes('OpenAI API quota')) {
+          errorDetails = 'The OpenAI API quota has been exceeded. Please check your OpenAI account billing and usage limits.';
+          errorCode = 'openai-quota-exceeded';
+        }
+        break;
+      case 'ScrapingError':
+        errorTitle = 'Data scraping failed';
+        errorDetails = `Failed to fetch sales data: ${error.message}`;
+        errorCode = 'scraping-error';
+        break;
+      case 'TimeoutError':
+        errorTitle = 'Request timeout';
+        errorDetails = `The operation timed out while ${error.operation}. Please try again.`;
+        errorCode = 'timeout-error';
+        statusCode = 408;
+        break;
+    }
+  }
+
   return new Response(
     JSON.stringify({
       success: false,
-      error,
-      details,
-      traceId
+      error: errorTitle,
+      details: errorDetails,
+      traceId: errorCode,
+      processingTime
     }),
     {
-      status,
+      status: statusCode,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     }
-  );
-}
-
-function handleParsingError(error: any): Response {
-  if (error.message.includes('Could not extract sufficient text from image')) {
-    return errorResponse(
-      'Image text extraction failed',
-      'The image quality is too poor for text extraction. Please try a clearer image or use the "Describe Card" tab instead.',
-      400,
-      'poor-image-quality'
-    );
-  }
-
-  if (error.message.includes('BILLING_DISABLED') || error.message.includes('billing to be enabled')) {
-    return errorResponse(
-      'Google Vision API billing not enabled',
-      'The Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project or use the "Describe Card" tab instead.',
-      400,
-      'billing-disabled'
-    );
-  }
-
-  if (error.message.includes('Cloud Vision API has not been used') || error.message.includes('SERVICE_DISABLED')) {
-    return errorResponse(
-      'Google Vision API not enabled',
-      'The Google Vision API needs to be enabled for your Google Cloud project. Please enable it or use the card description option instead.',
-      400,
-      'vision-api-disabled'
-    );
-  }
-
-  if (error.message.includes('insufficient_quota') || error.message.includes('exceeded your current quota')) {
-    return errorResponse(
-      'OpenAI API quota exceeded',
-      'The OpenAI API quota has been exceeded. Please check your OpenAI account billing and usage limits.',
-      400,
-      'openai-quota-exceeded'
-    );
-  }
-
-  return errorResponse(
-    'Card information parsing failed',
-    error.message,
-    500,
-    'parsing-error'
   );
 }
