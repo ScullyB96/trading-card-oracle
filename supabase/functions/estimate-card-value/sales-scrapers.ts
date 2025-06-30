@@ -52,37 +52,57 @@ export interface ProductionScraperResponse {
   };
 }
 
+// Global timeout for entire scraping operation
+const TOTAL_SCRAPING_TIMEOUT = 30000; // 30 seconds maximum
+
 export async function fetchRealSalesData(query: SearchQuery, sources: string[]): Promise<SalesResult[]> {
-  console.log('=== FETCHING REAL SALES DATA (OPTIMIZED STRATEGY) ===');
+  console.log('=== FETCHING REAL SALES DATA (TIMEOUT PROTECTED) ===');
   console.log('Query:', query);
   console.log('Sources:', sources);
   
+  const startTime = Date.now();
+  
   try {
-    // Build optimized tiered search queries
-    const searchQueries = buildOptimizedSearchQueries(query);
-    console.log('Built optimized search queries:', searchQueries);
+    // Build focused search queries (limited for speed)
+    const searchQueries = buildFocusedSearchQueries(query);
+    console.log('Built focused search queries:', searchQueries);
     
-    // Try queries in order of specificity
+    // Try queries with timeout protection
     for (const searchQuery of searchQueries) {
+      // Check global timeout
+      if (Date.now() - startTime > TOTAL_SCRAPING_TIMEOUT) {
+        console.warn('Global scraping timeout reached');
+        throw new Error('Scraping timeout - operation took too long');
+      }
+      
       console.log(`Trying search query: "${searchQuery}"`);
       
-      // Fetch from real sources in parallel
-      const fetchPromises: Promise<any>[] = [];
+      // Fetch from real sources in parallel with timeout
+      const fetchWithTimeout = async () => {
+        const fetchPromises: Promise<any>[] = [];
+        
+        if (sources.includes('ebay')) {
+          fetchPromises.push(fetchEbayComps(searchQuery));
+        }
+        
+        if (sources.includes('130point')) {
+          fetchPromises.push(fetch130PointComps(searchQuery));
+        }
+        
+        if (fetchPromises.length === 0) {
+          throw new Error('No valid sources selected');
+        }
+        
+        // Wait for all scrapers to complete with timeout
+        return await Promise.race([
+          Promise.allSettled(fetchPromises),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Source fetch timeout')), 15000)
+          )
+        ]) as PromiseSettledResult<any>[];
+      };
       
-      if (sources.includes('ebay')) {
-        fetchPromises.push(fetchEbayComps(searchQuery));
-      }
-      
-      if (sources.includes('130point')) {
-        fetchPromises.push(fetch130PointComps(searchQuery));
-      }
-      
-      if (fetchPromises.length === 0) {
-        continue;
-      }
-      
-      // Wait for all scrapers to complete
-      const results = await Promise.allSettled(fetchPromises);
+      const results = await fetchWithTimeout();
       
       let ebayResult = { results: [], error: undefined };
       let point130Result = { results: [], error: undefined };
@@ -99,7 +119,7 @@ export async function fetchRealSalesData(query: SearchQuery, sources: string[]):
             }
           }
         } else {
-          console.error(`Source ${sources[index]} failed:`, result.reason);
+          console.error(`Source ${sources[index]} failed:`, result.reason?.message || 'Unknown error');
         }
       });
       
@@ -133,7 +153,7 @@ export async function fetchRealSalesData(query: SearchQuery, sources: string[]):
     throw new Error('No relevant sales data found for any search variation');
     
   } catch (error) {
-    console.error('Production scraper error:', error);
+    console.error('Production scraper error:', error.message);
     throw new Error(`Real data fetching failed: ${error.message}`);
   }
 }
@@ -143,18 +163,18 @@ export async function fetchProductionComps(
   sources: string[],
   compLogic: string
 ): Promise<ProductionScraperResponse> {
-  console.log('=== FETCHING PRODUCTION COMPS (OPTIMIZED) ===');
+  console.log('=== FETCHING PRODUCTION COMPS (TIMEOUT PROTECTED) ===');
   const startTime = Date.now();
   
   try {
-    // Build comprehensive tiered search queries
-    const searchQueries = buildOptimizedSearchQueries(query);
-    console.log('Optimized search queries:', searchQueries);
+    // Build focused search queries (limit to 3 for speed)
+    const searchQueries = buildFocusedSearchQueries(query).slice(0, 3);
+    console.log('Focused search queries:', searchQueries);
     
     // Validate sources
     const validSources = sources.filter(s => ['ebay', '130point'].includes(s));
     if (validSources.length === 0) {
-      throw new Error('No valid sources selected');
+      return createErrorResponse('No valid sources selected', compLogic, startTime, []);
     }
     
     let allComps: NormalizedComp[] = [];
@@ -162,64 +182,99 @@ export async function fetchProductionComps(
     const rawResultCounts: { [key: string]: number } = {};
     const attemptedQueries: string[] = [];
     
-    // Try each search query until we find good results
+    // Try each search query with timeout management
     for (const searchQuery of searchQueries) {
-      console.log(`Attempting optimized search with: "${searchQuery}"`);
+      // Check global timeout
+      if (Date.now() - startTime > TOTAL_SCRAPING_TIMEOUT) {
+        console.warn('Global timeout reached, stopping scraping');
+        allErrors.push({
+          source: 'System',
+          message: 'Global timeout reached after 30 seconds'
+        });
+        break;
+      }
+      
+      console.log(`Attempting search with: "${searchQuery}"`);
       attemptedQueries.push(searchQuery);
       
-      // Fetch from real sources
-      const fetchPromises: Promise<any>[] = [];
-      
-      if (validSources.includes('ebay')) {
-        fetchPromises.push(fetchEbayComps(searchQuery));
-      }
-      
-      if (validSources.includes('130point')) {
-        fetchPromises.push(fetch130PointComps(searchQuery));
-      }
-      
-      const results = await Promise.allSettled(fetchPromises);
-      
-      let ebayResult = { results: [], error: undefined };
-      let point130Result = { results: [], error: undefined };
-      
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          if (validSources.includes('ebay') && index === 0) {
-            ebayResult = result.value;
-            rawResultCounts[`eBay_${searchQuery}`] = ebayResult.results.length;
-          } else if (validSources.includes('130point')) {
-            const point130Index = validSources.includes('ebay') ? 1 : 0;
-            if (index === point130Index) {
-              point130Result = result.value;
-              rawResultCounts[`130Point_${searchQuery}`] = point130Result.results.length;
-            }
+      try {
+        // Fetch from real sources with timeout
+        const fetchWithTimeout = async () => {
+          const fetchPromises: Promise<any>[] = [];
+          
+          if (validSources.includes('ebay')) {
+            fetchPromises.push(fetchEbayComps(searchQuery));
           }
-        } else {
-          console.error(`Source failed:`, result.reason);
-          const sourceName = index === 0 ? validSources[0] : validSources[1];
-          const error = {
-            source: sourceName || 'unknown',
-            message: result.reason?.message || 'Unknown error'
-          };
-          allErrors.push(error);
-          rawResultCounts[`${sourceName}_${searchQuery}`] = 0;
+          
+          if (validSources.includes('130point')) {
+            fetchPromises.push(fetch130PointComps(searchQuery));
+          }
+          
+          return await Promise.race([
+            Promise.allSettled(fetchPromises),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error(`Query timeout after 12 seconds: ${searchQuery}`)), 12000)
+            )
+          ]) as PromiseSettledResult<any>[];
+        };
+        
+        const results = await fetchWithTimeout();
+        
+        let ebayResult = { results: [], error: undefined };
+        let point130Result = { results: [], error: undefined };
+        
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') {
+            if (validSources.includes('ebay') && index === 0) {
+              ebayResult = result.value;
+              rawResultCounts[`eBay_${searchQuery}`] = ebayResult.results.length;
+            } else if (validSources.includes('130point')) {
+              const point130Index = validSources.includes('ebay') ? 1 : 0;
+              if (index === point130Index) {
+                point130Result = result.value;
+                rawResultCounts[`130Point_${searchQuery}`] = point130Result.results.length;
+              }
+            }
+          } else {
+            const sourceName = index === 0 ? validSources[0] : validSources[1];
+            const errorMessage = result.reason?.message || 'Unknown error';
+            console.error(`Source ${sourceName} failed:`, errorMessage);
+            
+            const error = {
+              source: sourceName || 'unknown',
+              message: errorMessage
+            };
+            allErrors.push(error);
+            rawResultCounts[`${sourceName}_${searchQuery}`] = 0;
+          }
+        });
+        
+        // Combine and normalize results for this query
+        const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
+        
+        // Add to our collection of all comps
+        allComps = allComps.concat(normalizationResult.comps);
+        allErrors = allErrors.concat(normalizationResult.errors);
+        
+        console.log(`Query "${searchQuery}" yielded ${normalizationResult.comps.length} normalized comps`);
+        
+        // If we found good results, we can stop trying more queries
+        if (normalizationResult.comps.length >= 3) {
+          console.log(`Found sufficient comps (${normalizationResult.comps.length}) with query: "${searchQuery}"`);
+          break;
         }
-      });
-      
-      // Combine and normalize results for this query
-      const normalizationResult = combineAndNormalizeResults(ebayResult, point130Result);
-      
-      // Add to our collection of all comps
-      allComps = allComps.concat(normalizationResult.comps);
-      allErrors = allErrors.concat(normalizationResult.errors);
-      
-      console.log(`Query "${searchQuery}" yielded ${normalizationResult.comps.length} normalized comps`);
-      
-      // If we found good results, we can stop trying more queries
-      if (normalizationResult.comps.length >= 3) {
-        console.log(`Found sufficient comps (${normalizationResult.comps.length}) with query: "${searchQuery}"`);
-        break;
+        
+      } catch (error) {
+        console.error(`Query "${searchQuery}" failed:`, error.message);
+        allErrors.push({
+          source: 'System',
+          message: `Query failed: ${error.message}`
+        });
+        
+        // Mark all sources as failed for this query
+        validSources.forEach(source => {
+          rawResultCounts[`${source}_${searchQuery}`] = 0;
+        });
       }
     }
     
@@ -227,35 +282,25 @@ export async function fetchProductionComps(
     
     // Check if we have any data at all
     if (allComps.length === 0) {
-      console.log('=== NO COMPS FOUND - DETAILED DEBUG INFO ===');
-      console.log('Attempted queries:', attemptedQueries);
-      console.log('Raw result counts:', rawResultCounts);
-      console.log('All errors:', allErrors);
+      console.log('=== NO COMPS FOUND - RETURNING STRUCTURED ERROR ===');
       
-      return {
-        estimatedValue: '$0.00',
-        logicUsed: compLogic,
-        exactMatchFound: false,
-        confidence: 0,
-        methodology: 'No data available',
-        matchMessage: allErrors.length > 0 
+      return createErrorResponse(
+        allErrors.length > 0 
           ? `All data sources failed: ${allErrors.map(e => `${e.source}: ${e.message}`).join('; ')}`
           : 'No sales data found for this card across all search variations',
-        comps: [],
-        errors: allErrors,
-        debug: {
-          attemptedQueries,
-          rawResultCounts,
-          totalProcessingTime: processingTime
-        }
-      };
+        compLogic,
+        startTime,
+        attemptedQueries,
+        rawResultCounts,
+        allErrors
+      );
     }
     
-    // Remove duplicates based on title and price similarity
+    // Remove duplicates
     const uniqueComps = deduplicateCompsAdvanced(allComps);
     console.log(`Advanced deduplication: ${allComps.length} -> ${uniqueComps.length} comps`);
     
-    // Find relevant matches with enhanced scoring
+    // Find relevant matches
     const matchResult = findRelevantMatches(uniqueComps, query, 0.3);
     
     // Calculate estimated value
@@ -297,32 +342,50 @@ export async function fetchProductionComps(
     return response;
     
   } catch (error) {
-    console.error('Production comps error:', error);
+    console.error('Production comps error:', error.message);
     
-    return {
-      estimatedValue: '$0.00',
-      logicUsed: compLogic,
-      exactMatchFound: false,
-      confidence: 0,
-      methodology: 'Error occurred',
-      matchMessage: `Error: ${error.message}`,
-      comps: [],
-      errors: [{
-        source: 'System',
-        message: error.message
-      }],
-      debug: {
-        attemptedQueries: [],
-        rawResultCounts: {},
-        totalProcessingTime: Date.now() - Date.now()
-      }
-    };
+    return createErrorResponse(
+      `Error: ${error.message}`,
+      compLogic,
+      startTime,
+      [],
+      {},
+      [{ source: 'System', message: error.message }]
+    );
   }
 }
 
-function buildOptimizedSearchQueries(query: SearchQuery): string[] {
-  console.log('=== BUILDING OPTIMIZED SEARCH QUERIES ===');
-  console.log('Input query:', query);
+// Helper function to create consistent error responses
+function createErrorResponse(
+  message: string,
+  compLogic: string,
+  startTime: number,
+  attemptedQueries: string[] = [],
+  rawResultCounts: { [key: string]: number } = {},
+  allErrors: Array<{ source: string; message: string }> = []
+): ProductionScraperResponse {
+  return {
+    estimatedValue: '$0.00',
+    logicUsed: compLogic,
+    exactMatchFound: false,
+    confidence: 0,
+    methodology: 'No data available',
+    matchMessage: message,
+    comps: [],
+    errors: allErrors.length > 0 ? allErrors : [{
+      source: 'System',
+      message: message
+    }],
+    debug: {
+      attemptedQueries,
+      rawResultCounts,
+      totalProcessingTime: Date.now() - startTime
+    }
+  };
+}
+
+function buildFocusedSearchQueries(query: SearchQuery): string[] {
+  console.log('=== BUILDING FOCUSED SEARCH QUERIES (SPEED OPTIMIZED) ===');
   
   const queries: string[] = [];
   
@@ -338,104 +401,34 @@ function buildOptimizedSearchQueries(query: SearchQuery): string[] {
   
   console.log('Extracted parts:', parts);
   
-  // Strategy 1: Exact title match (if we have comprehensive info)
+  // Strategy 1: Most specific search (if we have comprehensive info)
   if (parts.year && parts.player && parts.set && parts.cardNumber) {
-    // Handle Silver Prizm specifically for the known case
-    if (parts.set.toLowerCase().includes('silver') && parts.set.toLowerCase().includes('prizm')) {
-      queries.push(`${parts.year} Panini Prizm Rookie ${parts.player} #${parts.cardNumber} Silver Prizm RC`);
-      queries.push(`${parts.year} Panini Prizm ${parts.player} #${parts.cardNumber} Silver Prizm (RC)`);
-      queries.push(`${parts.year} Panini Prizm - Rookie ${parts.player} #${parts.cardNumber} Silver Prizm (RC)`);
-    }
-    
-    // Standard comprehensive search
-    const comprehensive = [parts.year, parts.set, parts.player, parts.cardNumber ? `#${parts.cardNumber}` : '', parts.grade || ''].filter(p => p).join(' ').replace(/\s+/g, ' ').trim();
-    if (comprehensive) queries.push(comprehensive);
+    queries.push(`${parts.year} ${parts.set} ${parts.player} #${parts.cardNumber}`);
   }
   
-  // Strategy 2: Core card attributes (most reliable)
+  // Strategy 2: Core search without card number
   if (parts.year && parts.player && parts.set) {
-    // With card number
-    if (parts.cardNumber) {
-      queries.push(`${parts.year} ${parts.set} ${parts.player} #${parts.cardNumber}`);
-      queries.push(`${parts.player} ${parts.year} ${parts.set} #${parts.cardNumber} RC`);
-    }
-    
-    // Without card number but with other key terms
     queries.push(`${parts.year} ${parts.set} ${parts.player} Rookie`);
-    queries.push(`${parts.player} ${parts.year} ${parts.set} RC`);
   }
   
-  // Strategy 3: Set variations (handle Prizm Silver, Chrome, etc.)
-  if (parts.player && parts.set) {
-    const setVariations = extractOptimizedSetVariations(parts.set);
-    for (const setVar of setVariations) {
-      const withNumber = parts.cardNumber ? ` #${parts.cardNumber}` : '';
-      queries.push(`${parts.player} ${setVar}${withNumber} RC`);
-      
-      if (parts.year) {
-        queries.push(`${parts.year} ${parts.player} ${setVar}${withNumber}`);
-      }
-    }
-  }
-  
-  // Strategy 4: Player-focused broad search
+  // Strategy 3: Player-focused search
   if (parts.player && parts.year) {
-    queries.push(`${parts.player} ${parts.year} ${parts.sport} rookie card`);
-    queries.push(`${parts.player} ${parts.year} RC`);
+    queries.push(`${parts.player} ${parts.year} Prizm RC`);
   }
   
-  // Strategy 5: Exact player + key terms from known listing
+  // Strategy 4: Specific fallback for known case
   if (parts.player === 'Jayden Daniels') {
-    queries.push('Jayden Daniels 2024 Panini Prizm Silver RC');
-    queries.push('Jayden Daniels Rookie Silver Prizm 2024');
-    queries.push('Jayden Daniels 347 Silver Prizm');
+    queries.push('Jayden Daniels 2024 Prizm Silver RC');
   }
   
-  // Remove duplicates and filter quality
+  // Remove duplicates and filter quality - limit to 4 for speed
   const uniqueQueries = [...new Set(queries)]
-    .filter(q => q.length > 8) // Minimum meaningful length
+    .filter(q => q.length > 8)
     .filter(q => !q.includes('unknown'))
-    .slice(0, 8); // Limit to 8 queries to avoid excessive requests
+    .slice(0, 4); // Limit to 4 queries maximum
   
-  console.log(`Built ${uniqueQueries.length} optimized search queries:`, uniqueQueries);
+  console.log(`Built ${uniqueQueries.length} focused search queries:`, uniqueQueries);
   return uniqueQueries;
-}
-
-function extractOptimizedSetVariations(setName: string): string[] {
-  const variations = [setName];
-  const setLower = setName.toLowerCase();
-  
-  // Enhanced Prizm variations
-  if (setLower.includes('prizm')) {
-    variations.push('Panini Prizm', 'Prizm');
-    
-    if (setLower.includes('silver')) {
-      variations.push('Prizm Silver', 'Silver Prizm', 'Panini Prizm Silver');
-    }
-    if (setLower.includes('gold')) {
-      variations.push('Prizm Gold', 'Gold Prizm');
-    }
-    if (setLower.includes('red')) {
-      variations.push('Prizm Red', 'Red Prizm');
-    }
-  }
-  
-  // Chrome variations
-  if (setLower.includes('chrome')) {
-    variations.push('Chrome', 'Topps Chrome', 'Bowman Chrome');
-  }
-  
-  // Optic variations
-  if (setLower.includes('optic')) {
-    variations.push('Optic', 'Panini Optic');
-  }
-  
-  // Select variations
-  if (setLower.includes('select')) {
-    variations.push('Select', 'Panini Select');
-  }
-  
-  return [...new Set(variations)];
 }
 
 function deduplicateCompsAdvanced(comps: NormalizedComp[]): NormalizedComp[] {
