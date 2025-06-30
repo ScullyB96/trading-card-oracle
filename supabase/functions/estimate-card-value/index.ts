@@ -2,7 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { corsHeaders } from './config.ts'
 import { Logger } from './logger.ts'
-import { parseCardFromImage, parseCardFromDescription } from './vision-parser.ts'
+import { parseCardFromImage, parseCardFromDescription } from './card-parser.ts'
 import { generateSearchQueries } from './query-generator.ts'
 import { discoverCardListings } from './search-discovery.ts'
 import { scrapeDirectLinks } from './direct-link-scrapers.ts'
