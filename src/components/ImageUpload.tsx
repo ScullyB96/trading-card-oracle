@@ -1,4 +1,4 @@
-
+import { memo } from "react";
 import { useCallback, memo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -105,5 +105,7 @@ const ImageUploadComponent = ({ onImageUpload, uploadedImage }: ImageUploadProps
     </div>
   );
 };
+
+const ImageUploadComponent = memo(ImageUploadComponent);
 
 export const ImageUpload = memo(ImageUploadComponent);
