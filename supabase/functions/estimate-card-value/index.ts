@@ -1,5 +1,3 @@
-// supabase/functions/estimate-card-value/index.ts
-
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
@@ -11,70 +9,83 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// ... (keep the rest of the interfaces like EstimationRequest, EstimationResponse)
+// --- Interfaces (keep your existing interfaces here) ---
+interface EstimationRequest {
+  image?: string;
+  description?: string;
+  sources: string[];
+  compLogic: string;
+}
 
-// Helper function to create a JSON response with CORS headers
+interface EstimationResponse {
+  success: boolean;
+  cardInfo?: ExtractedCardInfo;
+  salesResults?: any[]; // Use a more specific type if available
+  estimatedValue?: number;
+  confidence?: number;
+  methodology?: string;
+  dataPoints?: number;
+  priceRange?: { low: number; high: number };
+  logicUsed?: string;
+  warnings?: string[];
+  error?: string;
+  details?: string;
+  traceId?: string;
+  exactMatchFound?: boolean;
+  matchMessage?: string;
+  productionResponse?: ProductionScraperResponse;
+  errors?: Array<{
+    source: string;
+    message: string;
+  }>;
+}
+
+// --- Helper Function to create a JSON response with CORS headers ---
 function createJsonResponse(data: object, status: number = 200) {
-  return new Response(JSON.stringify(data), {
+  return new Response(JSON.stringify(data, null, 2), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    status,
+    status: status,
   });
 }
 
+
 serve(async (req) => {
-  // Handle preflight OPTIONS request
+  // --- This is the crucial part for fixing the CORS error ---
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: corsHeaders, status: 200 });
   }
 
   const startTime = Date.now();
   
   try {
-    console.log('=== PRODUCTION CARD ESTIMATION START ===');
     const requestData: EstimationRequest = await req.json();
-    console.log('=== RECEIVED PAYLOAD ===');
-    console.log('Payload summary:', {
-      hasImage: !!requestData.image,
-      descriptionLength: requestData.description?.length || 0,
-      sources: requestData.sources,
-      compLogic: requestData.compLogic,
-      imageDataLength: requestData.image?.length || 0
-    });
 
     // Input validation
     if (!requestData.sources || requestData.sources.length === 0) {
-      return createJsonResponse({ success: false, error: 'No data sources selected', details: 'Please select at least one data source' }, 400);
+      return createJsonResponse({ success: false, error: 'No data sources selected' }, 400);
     }
-
     const validSources = requestData.sources.filter(s => ['ebay', '130point'].includes(s));
     if (validSources.length === 0) {
-      return createJsonResponse({ success: false, error: 'Invalid data sources', details: 'Please select valid data sources (ebay, 130point)' }, 400);
+      return createJsonResponse({ success: false, error: 'Invalid data sources' }, 400);
     }
-    
     if (!requestData.image && !requestData.description?.trim()) {
-      return createJsonResponse({ success: false, error: 'No input provided', details: 'Please provide either an image or a card description' }, 400);
+      return createJsonResponse({ success: false, error: 'No input provided' }, 400);
     }
-    
-    const warnings: string[] = [];
+
     let cardInfo: ExtractedCardInfo;
 
     // STEP 1: Extract/Parse Card Information
-    console.log('=== STEP 1: CARD INFORMATION EXTRACTION ===');
     try {
       if (requestData.image) {
         cardInfo = await extractCardInfoFromImage(requestData.image);
       } else {
         cardInfo = await parseCardDescription(requestData.description!.trim());
       }
-      
-      if (!cardInfo.player || cardInfo.player === 'unknown' || cardInfo.player === 'Unknown') {
-        return createJsonResponse({ success: false, error: 'Could not identify player', details: 'Unable to extract player name from input. Please try a clearer image or more detailed description.' }, 400);
+      if (!cardInfo.player || cardInfo.player === 'unknown') {
+        return createJsonResponse({ success: false, error: 'Could not identify player from the provided input.' }, 400);
       }
-
     } catch (error) {
-      console.error('Card parsing failed:', error);
-      // You can expand handleParsingError to return the data for createJsonResponse
-      return createJsonResponse({ success: false, error: 'Card parsing failed', details: error.message }, 500);
+       return createJsonResponse({ success: false, error: `Card Parsing Failed: ${error.message}` }, 500);
     }
 
     const searchQuery: SearchQuery = {
@@ -86,51 +97,18 @@ serve(async (req) => {
       sport: cardInfo.sport
     };
 
-    // STEP 2: Use Production Scrapers (Real Data Only)
-    console.log('=== STEP 2: PRODUCTION SCRAPING (REAL DATA ONLY) ===');
+    // STEP 2: Fetch and process sales data
+    const productionResponse = await fetchProductionComps(
+      searchQuery,
+      validSources,
+      requestData.compLogic
+    );
     
-    try {
-      const productionResponse = await fetchProductionComps(searchQuery, validSources, requestData.compLogic);
-      const processingTime = Date.now() - startTime;
-      console.log(`=== PRODUCTION PROCESSING COMPLETE in ${processingTime}ms ===`);
-
-      // Add warnings
-      if (!productionResponse.exactMatchFound) {
-        warnings.push(productionResponse.matchMessage || 'No exact matches found');
-      }
-      if (productionResponse.confidence < 0.5) {
-        warnings.push('Lower confidence estimate due to limited matching data');
-      }
-      if (productionResponse.errors && productionResponse.errors.length > 0) {
-        productionResponse.errors.forEach(error => {
-          warnings.push(`${error.source} error: ${error.message}`);
-        });
-      }
-      
-      const response: EstimationResponse = {
-        success: true,
-        cardInfo,
-        estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
-        confidence: productionResponse.confidence,
-        methodology: productionResponse.methodology,
-        dataPoints: productionResponse.comps.length,
-        logicUsed: requestData.compLogic,
-        exactMatchFound: productionResponse.exactMatchFound,
-        matchMessage: productionResponse.matchMessage,
-        productionResponse, // You might want to remove this from the final response to reduce payload size
-        errors: productionResponse.errors,
-        warnings: warnings.length > 0 ? warnings : undefined
-      };
-
-      return createJsonResponse(response, 200);
-
-    } catch (error) {
-      console.error('Production scraper failed:', error);
-      return createJsonResponse({ success: false, error: 'Data scraping failed', details: `Failed to fetch real sales data: ${error.message}` }, 500);
-    }
+    // Final successful response
+    return createJsonResponse({ success: true, ...productionResponse }, 200);
 
   } catch (error) {
     console.error('=== UNHANDLED ERROR ===', error);
-    return createJsonResponse({ success: false, error: 'Unexpected error occurred', details: error.message }, 500);
+    return createJsonResponse({ success: false, error: 'An unexpected error occurred.', details: error.message }, 500);
   }
 });
