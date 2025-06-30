@@ -1,3 +1,8 @@
+import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
+import { fetch130PointComps } from './scrapers/130point-scraper.ts';
+import { combineAndNormalizeResults, NormalizedComp } from './scrapers/normalizer.ts';
+import { findRelevantMatches, calculateCompValue, MatchResult, CompingResult } from './scrapers/matching-logic.ts';
+
 export interface SalesResult {
   id: string;
   title: string;
@@ -9,6 +14,7 @@ export interface SalesResult {
   type?: string;
   condition?: string;
   matchScore: number;
+  selected?: boolean;
 }
 
 export interface SearchQuery {
@@ -20,60 +26,188 @@ export interface SearchQuery {
   sport: string;
 }
 
+export interface ProductionScraperResponse {
+  estimatedValue: string;
+  logicUsed: string;
+  exactMatchFound: boolean;
+  confidence: number;
+  methodology: string;
+  matchMessage?: string;
+  comps: Array<{
+    title: string;
+    price: number;
+    date: string;
+    source: string;
+    image?: string;
+    url: string;
+  }>;
+}
+
 export async function fetchRealSalesData(query: SearchQuery, sources: string[]): Promise<SalesResult[]> {
-  console.log('=== FETCHING REAL SALES DATA ===');
+  console.log('=== FETCHING REAL SALES DATA (PRODUCTION) ===');
   console.log('Query:', query);
   console.log('Sources:', sources);
   
-  const allResults: SalesResult[] = [];
-  const fetchPromises: Promise<SalesResult[]>[] = [];
-  
-  // Launch all scraper requests in parallel
-  if (sources.includes('ebay')) {
-    fetchPromises.push(scrapeEbaySales(query).catch(err => {
-      console.error('eBay scraping failed:', err);
-      return [];
-    }));
-  }
-  
-  if (sources.includes('130point')) {
-    fetchPromises.push(scrape130PointSales(query).catch(err => {
-      console.error('130point scraping failed:', err);
-      return [];
-    }));
-  }
-  
-  if (sources.includes('goldin')) {
-    fetchPromises.push(scrapeGoldinSales(query).catch(err => {
-      console.error('Goldin scraping failed:', err);
-      return [];
-    }));
-  }
-  
-  if (sources.includes('pwcc')) {
-    fetchPromises.push(scrapePWCCSales(query).catch(err => {
-      console.error('PWCC scraping failed:', err);
-      return [];
-    }));
-  }
-  
-  // Wait for all scrapers to complete
-  const results = await Promise.allSettled(fetchPromises);
-  
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      allResults.push(...result.value);
-    } else {
-      console.error(`Source ${index} failed:`, result.reason);
+  try {
+    // Build search query string
+    const searchQuery = buildSearchQuery(query);
+    console.log('Built search query:', searchQuery);
+    
+    // Fetch from real sources in parallel
+    const fetchPromises: Promise<any>[] = [];
+    
+    if (sources.includes('ebay')) {
+      fetchPromises.push(
+        fetchEbayComps(searchQuery).catch(err => {
+          console.error('eBay scraping failed:', err);
+          return [];
+        })
+      );
     }
-  });
+    
+    if (sources.includes('130point')) {
+      fetchPromises.push(
+        fetch130PointComps(searchQuery).catch(err => {
+          console.error('130Point scraping failed:', err);
+          return [];
+        })
+      );
+    }
+    
+    // Wait for all scrapers to complete
+    const results = await Promise.allSettled(fetchPromises);
+    
+    let ebayResults: any[] = [];
+    let point130Results: any[] = [];
+    
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        if (sources[index] === 'ebay') {
+          ebayResults = result.value;
+        } else if (sources[index] === '130point') {
+          point130Results = result.value;
+        }
+      }
+    });
+    
+    // Combine and normalize results
+    const normalizedComps = combineAndNormalizeResults(ebayResults, point130Results);
+    
+    // Find relevant matches
+    const matchResult = findRelevantMatches(normalizedComps, query, 0.6);
+    
+    // Convert to SalesResult format for compatibility
+    const salesResults = matchResult.relevantComps.map((comp, index) => ({
+      id: `${comp.source.toLowerCase()}_${Date.now()}_${index}`,
+      title: comp.title,
+      price: comp.price,
+      date: comp.date,
+      source: comp.source,
+      url: comp.url,
+      thumbnail: comp.image,
+      matchScore: comp.matchScore || 0.5,
+      selected: true
+    }));
+    
+    console.log(`Found ${salesResults.length} relevant sales across all sources`);
+    return salesResults;
+    
+  } catch (error) {
+    console.error('Production scraper error:', error);
+    throw new Error(`Real data fetching failed: ${error.message}`);
+  }
+}
+
+export async function fetchProductionComps(
+  query: SearchQuery,
+  sources: string[],
+  compLogic: string
+): Promise<ProductionScraperResponse> {
+  console.log('=== FETCHING PRODUCTION COMPS ===');
   
-  // Deduplicate and sort results
-  const deduplicatedResults = deduplicateResults(allResults);
-  const sortedResults = sortByRelevanceAndRecency(deduplicatedResults, query);
+  try {
+    // Build search query string
+    const searchQuery = buildSearchQuery(query);
+    console.log('Search query:', searchQuery);
+    
+    // Fetch from real sources
+    const fetchPromises: Promise<any>[] = [];
+    
+    if (sources.includes('ebay')) {
+      fetchPromises.push(fetchEbayComps(searchQuery));
+    }
+    
+    if (sources.includes('130point')) {
+      fetchPromises.push(fetch130PointComps(searchQuery));
+    }
+    
+    const results = await Promise.allSettled(fetchPromises);
+    
+    let ebayResults: any[] = [];
+    let point130Results: any[] = [];
+    
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        if (sources.includes('ebay') && index === 0) {
+          ebayResults = result.value;
+        } else if (sources.includes('130point')) {
+          point130Results = result.value;
+        }
+      }
+    });
+    
+    // Combine and normalize results
+    const normalizedComps = combineAndNormalizeResults(ebayResults, point130Results);
+    
+    // Find relevant matches
+    const matchResult = findRelevantMatches(normalizedComps, query);
+    
+    // Calculate estimated value
+    const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
+    
+    // Format response
+    const response: ProductionScraperResponse = {
+      estimatedValue: `$${compingResult.estimatedValue.toFixed(2)}`,
+      logicUsed: compLogic,
+      exactMatchFound: matchResult.exactMatchFound,
+      confidence: compingResult.confidence,
+      methodology: compingResult.methodology,
+      matchMessage: matchResult.matchMessage,
+      comps: matchResult.relevantComps.map(comp => ({
+        title: comp.title,
+        price: comp.price,
+        date: comp.date,
+        source: comp.source,
+        image: comp.image,
+        url: comp.url
+      }))
+    };
+    
+    console.log('Production scraper response:', {
+      estimatedValue: response.estimatedValue,
+      exactMatchFound: response.exactMatchFound,
+      compsCount: response.comps.length
+    });
+    
+    return response;
+    
+  } catch (error) {
+    console.error('Production comps error:', error);
+    throw new Error(`Production comps failed: ${error.message}`);
+  }
+}
+
+function buildSearchQuery(query: SearchQuery): string {
+  const parts = [
+    query.player,
+    query.year,
+    query.set,
+    query.cardNumber,
+    query.grade,
+    query.sport
+  ].filter(part => part && part !== 'unknown' && part.trim() !== '');
   
-  console.log(`Found ${sortedResults.length} total sales across all sources`);
-  return sortedResults;
+  return parts.join(' ').trim();
 }
 
 async function scrapeEbaySales(query: SearchQuery): Promise<SalesResult[]> {

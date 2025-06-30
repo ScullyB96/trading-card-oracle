@@ -3,7 +3,7 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
 import { extractCardInfoFromImage, parseCardDescription, ExtractedCardInfo } from './vision-parser.ts';
-import { fetchRealSalesData, SalesResult, SearchQuery } from './sales-scrapers.ts';
+import { fetchRealSalesData, fetchProductionComps, SalesResult, SearchQuery, ProductionScraperResponse } from './sales-scrapers.ts';
 import { calculateEstimatedValue, validatePriceConsistency, CalculationResult } from './value-calculator.ts';
 
 const corsHeaders = {
@@ -21,6 +21,7 @@ interface EstimationRequest {
   description?: string;
   sources: string[];
   compLogic: string;
+  useProductionScrapers?: boolean; // New flag to enable production scrapers
 }
 
 interface EstimationResponse {
@@ -37,6 +38,10 @@ interface EstimationResponse {
   error?: string;
   details?: string;
   traceId?: string;
+  // New production fields
+  exactMatchFound?: boolean;
+  matchMessage?: string;
+  productionResponse?: ProductionScraperResponse;
 }
 
 serve(async (req) => {
@@ -58,6 +63,7 @@ serve(async (req) => {
       descriptionLength: requestData.description?.length || 0,
       sources: requestData.sources,
       compLogic: requestData.compLogic,
+      useProductionScrapers: requestData.useProductionScrapers,
       imageDataLength: requestData.image?.length || 0
     });
 
@@ -99,22 +105,73 @@ serve(async (req) => {
       return handleParsingError(error);
     }
 
-    // STEP 2: Fetch Real Sales Data
-    console.log('=== STEP 2: REAL SALES DATA FETCH ===');
+    const searchQuery: SearchQuery = {
+      player: cardInfo.player,
+      year: cardInfo.year,
+      set: cardInfo.set,
+      cardNumber: cardInfo.cardNumber,
+      grade: cardInfo.grade,
+      sport: cardInfo.sport
+    };
+
+    // STEP 2: Choose scraping method
+    console.log('=== STEP 2: CHOOSING SCRAPING METHOD ===');
+    
+    if (requestData.useProductionScrapers) {
+      console.log('Using PRODUCTION SCRAPERS');
+      
+      try {
+        const productionResponse = await fetchProductionComps(
+          searchQuery,
+          requestData.sources,
+          requestData.compLogic
+        );
+        
+        const processingTime = Date.now() - startTime;
+        console.log(`=== PRODUCTION PROCESSING COMPLETE in ${processingTime}ms ===`);
+        
+        // Add warnings based on match quality
+        if (!productionResponse.exactMatchFound) {
+          warnings.push(productionResponse.matchMessage || 'No exact matches found');
+        }
+        
+        if (productionResponse.confidence < 0.5) {
+          warnings.push('Lower confidence estimate due to limited matching data');
+        }
+        
+        const response: EstimationResponse = {
+          success: true,
+          cardInfo,
+          estimatedValue: parseFloat(productionResponse.estimatedValue.replace('$', '')),
+          confidence: productionResponse.confidence,
+          methodology: productionResponse.methodology,
+          dataPoints: productionResponse.comps.length,
+          logicUsed: requestData.compLogic,
+          exactMatchFound: productionResponse.exactMatchFound,
+          matchMessage: productionResponse.matchMessage,
+          productionResponse,
+          warnings: warnings.length > 0 ? warnings : undefined
+        };
+
+        return new Response(
+          JSON.stringify(response),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
+        
+      } catch (error) {
+        console.error('Production scraper failed:', error);
+        warnings.push('Production scrapers failed, falling back to legacy system');
+        // Fall through to legacy system
+      }
+    }
+
+    // STEP 2 (Legacy): Fetch Real Sales Data
+    console.log('=== STEP 2: REAL SALES DATA FETCH (LEGACY) ===');
     let salesResults: SalesResult[];
     
     try {
-      const searchQuery: SearchQuery = {
-        player: cardInfo.player,
-        year: cardInfo.year,
-        set: cardInfo.set,
-        cardNumber: cardInfo.cardNumber,
-        grade: cardInfo.grade,
-        sport: cardInfo.sport
-      };
-      
-      console.log('Search query:', searchQuery);
-      
       salesResults = await fetchRealSalesData(searchQuery, requestData.sources);
       console.log(`Found ${salesResults.length} total sales results`);
       
