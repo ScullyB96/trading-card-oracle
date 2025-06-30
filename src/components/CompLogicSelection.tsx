@@ -1,4 +1,3 @@
-
 import { memo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -82,7 +81,5 @@ const CompLogicSelectionComponent = ({ compLogic, onCompLogicChange }: CompLogic
     </Card>
   );
 };
-
-export const CompLogicSelectionComponent = memo(CompLogicSelectionComponent);
 
 export const CompLogicSelection = memo(CompLogicSelectionComponent);
