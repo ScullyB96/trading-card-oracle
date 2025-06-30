@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -35,10 +36,10 @@ const logicLabels: { [key: string]: string } = {
   mode: "Most Common Range"
 };
 
-export const ResultsDisplay = ({ 
-  results, 
-  estimatedValue, 
-  onResultToggle, 
+const ResultsDisplayComponent = ({
+  results,
+  estimatedValue,
+  onResultToggle,
   isLoading,
   logicUsed,
   warnings
@@ -50,4 +51,10 @@ export const ResultsDisplay = ({
     return (
       <Card className="bg-white/80 backdrop-blur-sm border-white/20 sticky top-24">
         <CardHeader>
-          <CardTitle className
+          <CardTitle className="flex items-center space-x-2">
+            <DollarSign className="h-5 w-5 text-green-600" />
+            <span>Analyzing...</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4
