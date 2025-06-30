@@ -14,8 +14,6 @@ interface EstimationRequest {
 
 serve(async (req) => {
   // **DEFINITIVE CORS PREFLIGHT FIX**
-  // This block handles the browser's preflight request. It must return a 2xx
-  // status (204 is best) with the correct headers for the browser to proceed.
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders, status: 204 });
   }
@@ -34,12 +32,9 @@ serve(async (req) => {
     }
 
     let cardKeywords;
-    // Prioritize text description as it's more reliable than image parsing.
     if (requestBody.description) {
-        logger.info('Parsing card from description', { traceId });
         cardKeywords = await parseCardDescription(requestBody.description);
     } else if (requestBody.image) {
-        logger.info('Parsing card from image', { traceId });
         cardKeywords = await extractCardInfoFromImage(requestBody.image);
     } else {
         throw new CardEstimationError('No input provided.', 'INVALID_INPUT', traceId);
@@ -47,8 +42,6 @@ serve(async (req) => {
 
     logger.info('Card parsing complete', { traceId, player: cardKeywords.player });
     
-    // Call the single, robust function to get results.
-    // Note: The `sources` parameter is no longer needed here as the new architecture only uses eBay's API.
     const productionResult = await fetchProductionComps(
       cardKeywords,
       requestBody.compLogic,
@@ -64,14 +57,12 @@ serve(async (req) => {
 
     logger.info('Card estimation complete', { traceId, success: true });
 
-    // Return the final success response with correct CORS headers.
     return new Response(JSON.stringify(response), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200
     });
 
   } catch (error: any) {
-    // The centralized error handler will apply the correct CORS headers to the error response.
     return handleError(error, traceId, logger);
   }
 });
