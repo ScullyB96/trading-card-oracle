@@ -1,7 +1,8 @@
+import { corsHeaders } from './config.ts'; // Import centralized headers
 
 // Custom error classes for better error handling and debugging
 export class CardProcessingError extends Error {
-  constructor(message: string, public code: string, public statusCode: number = 500) {
+  constructor(public message: string, public code: string, public statusCode: number = 500) {
     super(message);
     this.name = 'CardProcessingError';
   }
@@ -50,16 +51,12 @@ export class TimeoutError extends CardProcessingError {
 }
 
 export function handleError(error: any, traceId: string, logger?: any) {
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  };
+  // This function now uses the centralized corsHeaders from config.ts
 
   if (logger) {
     logger.error('Request failed', error, { traceId });
   }
 
-  // Handle specific error types
   if (error instanceof CardEstimationError) {
     return new Response(JSON.stringify({
       success: false,
