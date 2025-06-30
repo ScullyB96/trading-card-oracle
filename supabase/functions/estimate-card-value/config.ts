@@ -33,8 +33,8 @@ export function loadConfiguration(): AppConfig {
   const config: AppConfig = {
     googleVisionApiKey: Deno.env.get("GOOGLE_VISION_API_KEY") || "",
     openaiApiKey: Deno.env.get("OPENAI_API_KEY") || "",
-    googleSearchApiKey: Deno.env.get("Google Search_API_KEY") || "",
-    googleSearchEngineId: Deno.env.get("Google Search_ENGINE_ID") || "",
+    googleSearchApiKey: Deno.env.get("GOOGLE_SEARCH_API_KEY") || "",
+    googleSearchEngineId: Deno.env.get("GOOGLE_SEARCH_ENGINE_ID") || "",
     ebayAppId: Deno.env.get("EBAY_APP_ID") || "",
     supabaseUrl: Deno.env.get("SUPABASE_URL") || "",
     supabaseAnonKey: Deno.env.get("SUPABASE_ANON_KEY") || "",
