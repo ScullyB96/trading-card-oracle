@@ -27,7 +27,7 @@ export function combineAndNormalizeResults(
   point130Result: { results: Point130Result[], error?: Point130Error },
   ebayFindingResult?: { results: EbayFindingResult[], error?: EbayFindingError }
 ): NormalizationResult {
-  console.log('=== RESILIENT NORMALIZATION PROCESS ===');
+  console.log('=== RESILIENT NORMALIZATION PROCESS WITH EBAY FINDING API ===');
   console.log(`eBay: ${ebayResult.results?.length || 0} results${ebayResult.error ? ' (with error)' : ''}`);
   console.log(`130Point: ${point130Result.results?.length || 0} results${point130Result.error ? ' (with error)' : ''}`);
   console.log(`eBay Finding: ${ebayFindingResult?.results?.length || 0} results${ebayFindingResult?.error ? ' (with error)' : ''}`);
@@ -43,7 +43,7 @@ export function combineAndNormalizeResults(
   // Remove duplicates with error tolerance
   const dedupedResults = safelyDeduplicateResults(normalizedResults, errors);
   
-  console.log(`✅ Resilient normalization complete: ${dedupedResults.length} final comps, ${errors.length} errors collected`);
+  console.log(`✅ Resilient normalization complete with eBay Finding API: ${dedupedResults.length} final comps, ${errors.length} errors collected`);
   
   return {
     comps: dedupedResults,

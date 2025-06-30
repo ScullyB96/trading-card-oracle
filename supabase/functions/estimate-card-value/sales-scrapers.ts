@@ -1,5 +1,7 @@
+
 import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
 import { fetch130PointComps } from './scrapers/130point-scraper.ts';
+import { scrapeEbayCompletedItems } from './scrapers/ebay-finding-scraper.ts';
 import { combineAndNormalizeResults, NormalizedComp } from './scrapers/normalizer.ts';
 import { findRelevantMatches, calculateCompValue, MatchResult, CompingResult } from './scrapers/matching-logic.ts';
 import { discoverListingsViaGoogle } from './google-search-scraper.ts';
@@ -74,13 +76,14 @@ export async function fetchProductionComps(
   const logger = new Logger(traceId);
   const startTime = Date.now();
   
-  logger.info('Starting OPTIMIZED production scraping', {
+  logger.info('Starting OPTIMIZED production scraping with eBay Finding API', {
     operation: 'fetchProductionComps',
     sources,
     compLogic,
     player: cardKeywords.player,
     year: cardKeywords.year,
-    set: cardKeywords.set
+    set: cardKeywords.set,
+    ebayFindingEnabled: !!config.ebayAppId
   });
 
   try {
@@ -141,11 +144,11 @@ export async function fetchProductionComps(
       }
     }
 
-    // STEP 3: Fallback to traditional scraping if insufficient results or search disabled
+    // STEP 3: Fallback to traditional scraping with eBay Finding API integration
     if (allComps.length < 3) {
-      logger.info('Phase 3: Traditional scraping fallback');
+      logger.info('Phase 3: Traditional scraping fallback with eBay Finding API');
       
-      const fallbackResult = await executeQuickFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
+      const fallbackResult = await executeEnhancedFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
       allComps = [...allComps, ...fallbackResult.comps];
       allErrors = [...allErrors, ...fallbackResult.errors];
     }
@@ -154,7 +157,7 @@ export async function fetchProductionComps(
     const result = await processScrapingResults(allComps, allErrors, cardKeywords, compLogic, logger);
     
     const processingTime = Date.now() - startTime;
-    logger.performance('OPTIMIZED fetchProductionComps completed', processingTime);
+    logger.performance('OPTIMIZED fetchProductionComps with eBay Finding API completed', processingTime);
     
     return {
       ...result,
@@ -163,20 +166,21 @@ export async function fetchProductionComps(
         rawResultCounts: {
           totalComps: allComps.length,
           highConfidenceComps: allComps.filter(c => c.matchScore >= 0.7).length,
-          processedSources: sources.length
+          processedSources: sources.length,
+          ebayFindingEnabled: !!config.ebayAppId
         },
         totalProcessingTime: processingTime,
         traceId,
-        architecture: 'Optimized Discover-then-Scrape v2.1'
+        architecture: 'Optimized Discover-then-Scrape v2.1 with eBay Finding API'
       }
     };
 
   } catch (error) {
     const processingTime = Date.now() - startTime;
-    logger.error('OPTIMIZED production scraping failed completely', error, { processingTime });
+    logger.error('OPTIMIZED production scraping with eBay Finding API failed completely', error, { processingTime });
     
     return createRobustErrorResponse(
-      'Optimized scraping failed',
+      'Optimized scraping with eBay Finding API failed',
       compLogic,
       processingTime,
       [],
@@ -187,16 +191,17 @@ export async function fetchProductionComps(
   }
 }
 
-async function executeQuickFallbackScraping(
+async function executeEnhancedFallbackScraping(
   queries: string[],
   sources: string[],
   logger: Logger
 ): Promise<{ comps: NormalizedComp[]; errors: Array<{ source: string; message: string }> }> {
   
-  logger.info('Executing quick fallback scraping', {
-    operation: 'executeQuickFallbackScraping',
+  logger.info('Executing enhanced fallback scraping with eBay Finding API', {
+    operation: 'executeEnhancedFallbackScraping',
     queryCount: queries.length,
-    sources
+    sources,
+    ebayFindingEnabled: !!config.ebayAppId
   });
 
   const comps: NormalizedComp[] = [];
@@ -209,6 +214,7 @@ async function executeQuickFallbackScraping(
   try {
     const promises: Promise<any>[] = [];
 
+    // Traditional eBay scraping
     if (sources.includes('ebay')) {
       promises.push(
         rateLimitedFetch(() => 
@@ -217,6 +223,17 @@ async function executeQuickFallbackScraping(
       );
     }
 
+    // eBay Finding API scraping (if enabled and configured)
+    if (sources.includes('ebay') && config.ebayAppId) {
+      logger.info('Adding eBay Finding API to scraping pipeline');
+      promises.push(
+        rateLimitedFetch(() => 
+          withTimeout(scrapeEbayCompletedItems(query, config.ebayAppId, { maxResults: 15 }), 12000, 'eBay Finding API')
+        ).catch(error => ({ results: [], error: { source: 'eBay Finding API', message: error.message } }))
+      );
+    }
+
+    // 130Point scraping
     if (sources.includes('130point')) {
       promises.push(
         rateLimitedFetch(() => 
@@ -228,35 +245,45 @@ async function executeQuickFallbackScraping(
     const results = await Promise.all(promises);
     
     let ebayResult = { results: [], error: undefined };
+    let ebayFindingResult = { results: [], error: undefined };
     let point130Result = { results: [], error: undefined };
     
-    if (sources.includes('ebay') && results[0]) {
-      ebayResult = results[0];
+    let resultIndex = 0;
+    
+    if (sources.includes('ebay')) {
+      ebayResult = results[resultIndex++] || { results: [], error: undefined };
     }
+    
+    if (sources.includes('ebay') && config.ebayAppId) {
+      ebayFindingResult = results[resultIndex++] || { results: [], error: undefined };
+    }
+    
     if (sources.includes('130point')) {
-      const resultIndex = sources.includes('ebay') ? 1 : 0;
-      if (results[resultIndex]) {
-        point130Result = results[resultIndex];
-      }
+      point130Result = results[resultIndex++] || { results: [], error: undefined };
     }
 
+    // Collect errors
     if (ebayResult.error) errors.push(ebayResult.error);
+    if (ebayFindingResult.error) errors.push(ebayFindingResult.error);
     if (point130Result.error) errors.push(point130Result.error);
 
-    const normalizedResult = combineAndNormalizeResults(ebayResult, point130Result);
+    // Combine and normalize results including eBay Finding API
+    const normalizedResult = combineAndNormalizeResults(ebayResult, point130Result, ebayFindingResult);
     comps.push(...normalizedResult.comps);
     errors.push(...normalizedResult.errors);
 
-  } catch (error) {
-    logger.error('Quick fallback failed', error, { query });
-    errors.push({ source: 'Quick Fallback', message: `Query failed: ${error.message}` });
-  }
+    logger.info('Enhanced fallback scraping completed', {
+      operation: 'executeEnhancedFallbackScraping',
+      traditionalEbayResults: ebayResult.results?.length || 0,
+      ebayFindingResults: ebayFindingResult.results?.length || 0,
+      point130Results: point130Result.results?.length || 0,
+      totalComps: comps.length
+    });
 
-  logger.info('Quick fallback completed', {
-    operation: 'executeQuickFallbackScraping',
-    compsFound: comps.length,
-    errorsEncountered: errors.length
-  });
+  } catch (error) {
+    logger.error('Enhanced fallback scraping failed', error, { query });
+    errors.push({ source: 'Enhanced Fallback', message: `Query failed: ${error.message}` });
+  }
 
   return { comps, errors };
 }
