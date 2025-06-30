@@ -1,4 +1,3 @@
-
 import { fetchEbayComps } from './scrapers/ebay-scraper.ts';
 import { fetch130PointComps } from './scrapers/130point-scraper.ts';
 import { combineAndNormalizeResults, NormalizedComp } from './scrapers/normalizer.ts';
@@ -64,7 +63,7 @@ export interface ProductionScraperResponse {
 }
 
 // Rate-limited executor for API calls
-const rateLimitedFetch = rateLimitedExecutor(1200);
+const rateLimitedFetch = rateLimitedExecutor(2000); // Increased delay
 
 export async function fetchProductionComps(
   cardKeywords: ExtractedCardKeywords,
@@ -75,7 +74,7 @@ export async function fetchProductionComps(
   const logger = new Logger(traceId);
   const startTime = Date.now();
   
-  logger.info('Starting NEW ARCHITECTURE production scraping', {
+  logger.info('Starting OPTIMIZED production scraping', {
     operation: 'fetchProductionComps',
     sources,
     compLogic,
@@ -85,53 +84,73 @@ export async function fetchProductionComps(
   });
 
   try {
-    // STEP 1: Generate intelligent search queries
+    // STEP 1: Generate optimized search queries (limited count)
     const querySet = generateSearchQueries(cardKeywords, logger);
     
     if (querySet.allQueries.length === 0) {
       throw new Error('No valid search queries generated');
     }
 
-    // STEP 2: PRIMARY DISCOVERY - Use Google Search API
-    logger.info('Phase 1: Google Search Discovery');
-    const googleDiscovery = await discoverListingsViaGoogle(querySet.allQueries, logger, 40);
-    
     let allComps: NormalizedComp[] = [];
-    let allErrors: Array<{ source: string; message: string }> = [...googleDiscovery.errors];
+    let allErrors: Array<{ source: string; message: string }> = [];
 
-    // STEP 3: Scrape discovered direct links
-    if (googleDiscovery.discoveredListings.length > 0) {
-      logger.info(`Phase 2: Direct Link Scraping (${googleDiscovery.discoveredListings.length} URLs)`);
+    // STEP 2: Try Google Discovery (with timeout)
+    logger.info('Phase 1: Google Search Discovery (Optimized)');
+    
+    try {
+      const discoveryPromise = discoverListingsViaGoogle(querySet.primaryQueries, logger, 15);
+      const googleDiscovery = await withTimeout(discoveryPromise, 25000, 'Google Discovery');
       
-      const directLinkUrls = googleDiscovery.discoveredListings
-        .slice(0, 20) // Limit to prevent timeout
-        .map(listing => listing.url);
-      
-      const directLinkResults = await scrapeDirectLinks(directLinkUrls, logger);
-      
-      // Convert direct link results to normalized comps
-      const directComps: NormalizedComp[] = directLinkResults.results.map(result => ({
-        title: result.title,
-        price: result.price,
-        date: result.date,
-        source: result.source,
-        image: result.image,
-        url: result.url,
-        matchScore: 0.8 // High confidence since these came from targeted search
-      }));
+      allErrors = [...allErrors, ...googleDiscovery.errors];
 
-      allComps = [...directComps];
-      allErrors = [...allErrors, ...directLinkResults.errors.map(e => ({ source: e.source, message: e.message }))];
-      
-      logger.info(`Direct link scraping completed: ${directComps.length} comps found`);
-    }
+      // STEP 3: Process discovered links (limited)
+      if (googleDiscovery.discoveredListings.length > 0) {
+        logger.info(`Phase 2: Direct Link Scraping (${Math.min(googleDiscovery.discoveredListings.length, 8)} URLs)`);
+        
+        const directLinkUrls = googleDiscovery.discoveredListings
+          .slice(0, 8) // Limit to prevent timeout
+          .map(listing => listing.url);
+        
+        try {
+          const directLinkPromise = scrapeDirectLinks(directLinkUrls, logger);
+          const directLinkResults = await withTimeout(directLinkPromise, 20000, 'Direct Link Scraping');
+          
+          const directComps: NormalizedComp[] = directLinkResults.results.map(result => ({
+            title: result.title,
+            price: result.price,
+            date: result.date,
+            source: result.source,
+            image: result.image,
+            url: result.url,
+            matchScore: 0.8
+          }));
 
-    // STEP 4: FALLBACK - Traditional scraping if insufficient results
-    if (allComps.length < 5) {
-      logger.info('Phase 3: Fallback to traditional scraping (insufficient direct results)');
+          allComps = [...directComps];
+          allErrors = [...allErrors, ...directLinkResults.errors.map(e => ({ source: e.source, message: e.message }))];
+          
+          logger.info(`Direct link scraping completed: ${directComps.length} comps found`);
+        } catch (directError) {
+          logger.error('Direct link scraping failed', directError);
+          allErrors.push({ source: 'Direct Scraping', message: directError.message });
+        }
+      }
+
+      // STEP 4: Quick fallback if insufficient results
+      if (allComps.length < 3) {
+        logger.info('Phase 3: Quick fallback to traditional scraping');
+        
+        const fallbackResult = await executeQuickFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
+        allComps = [...allComps, ...fallbackResult.comps];
+        allErrors = [...allErrors, ...fallbackResult.errors];
+      }
+
+    } catch (discoveryError) {
+      logger.error('Google discovery failed, falling back to traditional scraping', discoveryError);
+      allErrors.push({ source: 'Google Discovery', message: discoveryError.message });
       
-      const fallbackResult = await executeFallbackScraping(querySet.primaryQueries.slice(0, 3), sources, logger);
-      allComps = [...allComps, ...fallbackResult.comps];
+      // Emergency fallback
+      const fallbackResult = await executeQuickFallbackScraping(querySet.primaryQueries.slice(0, 2), sources, logger);
+      allComps = [...fallbackResult.comps];
       allErrors = [...allErrors, ...fallbackResult.errors];
     }
 
@@ -139,47 +158,47 @@ export async function fetchProductionComps(
     const result = await processScrapingResults(allComps, allErrors, cardKeywords, compLogic, logger);
     
     const processingTime = Date.now() - startTime;
-    logger.performance('NEW ARCHITECTURE fetchProductionComps', processingTime);
+    logger.performance('OPTIMIZED fetchProductionComps completed', processingTime);
     
     return {
       ...result,
       debug: {
         attemptedQueries: querySet.allQueries,
         rawResultCounts: {
-          googleDiscovered: googleDiscovery.discoveredListings.length,
-          directLinkSuccess: allComps.filter(c => c.matchScore >= 0.8).length,
-          fallbackResults: allComps.filter(c => c.matchScore < 0.8).length
+          totalComps: allComps.length,
+          highConfidenceComps: allComps.filter(c => c.matchScore >= 0.7).length,
+          processedSources: sources.length
         },
         totalProcessingTime: processingTime,
         traceId,
-        architecture: 'Discover-then-Scrape v2.0'
+        architecture: 'Optimized Discover-then-Scrape v2.1'
       }
     };
 
   } catch (error) {
     const processingTime = Date.now() - startTime;
-    logger.error('NEW ARCHITECTURE production scraping failed completely', error, { processingTime });
+    logger.error('OPTIMIZED production scraping failed completely', error, { processingTime });
     
     return createRobustErrorResponse(
-      'All scraping strategies failed in new architecture',
+      'Optimized scraping failed',
       compLogic,
       processingTime,
       [],
       {},
-      [{ source: 'System', message: `Complete failure: ${error.message}` }],
+      [{ source: 'System', message: `Optimized failure: ${error.message}` }],
       traceId
     );
   }
 }
 
-async function executeFallbackScraping(
+async function executeQuickFallbackScraping(
   queries: string[],
   sources: string[],
   logger: Logger
 ): Promise<{ comps: NormalizedComp[]; errors: Array<{ source: string; message: string }> }> {
   
-  logger.info('Executing fallback traditional scraping', {
-    operation: 'executeFallbackScraping',
+  logger.info('Executing quick fallback scraping', {
+    operation: 'executeQuickFallbackScraping',
     queryCount: queries.length,
     sources
   });
@@ -187,49 +206,58 @@ async function executeFallbackScraping(
   const comps: NormalizedComp[] = [];
   const errors: Array<{ source: string; message: string }> = [];
 
-  for (const query of queries) {
-    try {
-      // Use existing scrapers as fallback
-      let ebayResult = { results: [], error: undefined };
-      let point130Result = { results: [], error: undefined };
+  // Only try the first query to avoid timeouts
+  const query = queries[0];
+  if (!query) return { comps, errors };
 
-      if (sources.includes('ebay')) {
-        try {
-          ebayResult = await rateLimitedFetch(() => 
-            withTimeout(fetchEbayComps(query), config.timeout.request, 'eBay fallback scraping')
-          );
-          if (ebayResult.error) errors.push(ebayResult.error);
-        } catch (error) {
-          logger.error('eBay fallback scraping failed', error, { query });
-          errors.push({ source: 'eBay Fallback', message: error.message });
-        }
-      }
+  try {
+    const promises: Promise<any>[] = [];
 
-      if (sources.includes('130point')) {
-        try {
-          point130Result = await rateLimitedFetch(() => 
-            withTimeout(fetch130PointComps(query), config.timeout.request, '130Point fallback scraping')
-          );
-          if (point130Result.error) errors.push(point130Result.error);
-        } catch (error) {
-          logger.error('130Point fallback scraping failed', error, { query });
-          errors.push({ source: '130Point Fallback', message: error.message });
-        }
-      }
-
-      // Combine results
-      const normalizedResult = combineAndNormalizeResults(ebayResult, point130Result);
-      comps.push(...normalizedResult.comps);
-      errors.push(...normalizedResult.errors);
-
-    } catch (error) {
-      logger.error('Fallback query failed', error, { query });
-      errors.push({ source: 'Fallback Scraper', message: `Query failed: ${error.message}` });
+    if (sources.includes('ebay')) {
+      promises.push(
+        rateLimitedFetch(() => 
+          withTimeout(fetchEbayComps(query), 10000, 'eBay quick fallback')
+        ).catch(error => ({ results: [], error: { source: 'eBay Quick', message: error.message } }))
+      );
     }
+
+    if (sources.includes('130point')) {
+      promises.push(
+        rateLimitedFetch(() => 
+          withTimeout(fetch130PointComps(query), 10000, '130Point quick fallback')
+        ).catch(error => ({ results: [], error: { source: '130Point Quick', message: error.message } }))
+      );
+    }
+
+    const results = await Promise.all(promises);
+    
+    let ebayResult = { results: [], error: undefined };
+    let point130Result = { results: [], error: undefined };
+    
+    if (sources.includes('ebay') && results[0]) {
+      ebayResult = results[0];
+    }
+    if (sources.includes('130point')) {
+      const resultIndex = sources.includes('ebay') ? 1 : 0;
+      if (results[resultIndex]) {
+        point130Result = results[resultIndex];
+      }
+    }
+
+    if (ebayResult.error) errors.push(ebayResult.error);
+    if (point130Result.error) errors.push(point130Result.error);
+
+    const normalizedResult = combineAndNormalizeResults(ebayResult, point130Result);
+    comps.push(...normalizedResult.comps);
+    errors.push(...normalizedResult.errors);
+
+  } catch (error) {
+    logger.error('Quick fallback failed', error, { query });
+    errors.push({ source: 'Quick Fallback', message: `Query failed: ${error.message}` });
   }
 
-  logger.info('Fallback scraping completed', {
-    operation: 'executeFallbackScraping',
+  logger.info('Quick fallback completed', {
+    operation: 'executeQuickFallbackScraping',
     compsFound: comps.length,
     errorsEncountered: errors.length
   });
@@ -246,7 +274,7 @@ async function processScrapingResults(
 ): Promise<Omit<ProductionScraperResponse, 'debug'>> {
   
   if (comps.length === 0) {
-    logger.warn('No comparable sales found in new architecture');
+    logger.warn('No comparable sales found in optimized architecture');
     
     return {
       estimatedValue: '$0.00',
@@ -270,11 +298,10 @@ async function processScrapingResults(
       sport: cardKeywords.sport
     };
 
-    // Enhanced matching logic for keyword-based searching
-    const matchResult = findRelevantMatches(comps, searchQuery, 0.2); // Lower threshold for broader searches
+    const matchResult = findRelevantMatches(comps, searchQuery, 0.1); // Lower threshold
     const compingResult = calculateCompValue(matchResult.relevantComps, compLogic);
 
-    logger.info('Results processed with new architecture', {
+    logger.info('Results processed with optimized architecture', {
       operation: 'processScrapingResults',
       totalComps: comps.length,
       relevantComps: matchResult.relevantComps.length,
@@ -301,9 +328,8 @@ async function processScrapingResults(
     };
     
   } catch (error) {
-    logger.error('Result processing failed in new architecture', error);
+    logger.error('Result processing failed in optimized architecture', error);
     
-    // Emergency fallback calculation
     const prices = comps.map(c => c.price).filter(p => p > 0);
     const avgPrice = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
     
@@ -355,12 +381,12 @@ function createRobustErrorResponse(
       attemptedQueries,
       rawResultCounts,
       totalProcessingTime: processingTime,
-      traceId
+      traceId,
+      architecture: 'Optimized Discover-then-Scrape v2.1'
     }
   };
 }
 
-// Legacy function maintained for backward compatibility
 export async function fetchRealSalesData(cardKeywords: ExtractedCardKeywords, sources: string[]): Promise<any[]> {
   try {
     const result = await fetchProductionComps(cardKeywords, sources, 'average3');

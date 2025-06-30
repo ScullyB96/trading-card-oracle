@@ -29,9 +29,9 @@ export interface GoogleDiscoveryResult {
 export async function discoverListingsViaGoogle(
   searchQueries: string[],
   logger: Logger,
-  maxResults: number = 50
+  maxResults: number = 20
 ): Promise<GoogleDiscoveryResult> {
-  logger.info('Starting Google Search discovery', {
+  logger.info('Starting optimized Google Search discovery', {
     operation: 'discoverListingsViaGoogle',
     queryCount: searchQueries.length,
     maxResults
@@ -50,62 +50,60 @@ export async function discoverListingsViaGoogle(
   const discoveredListings: DiscoveredListing[] = [];
   const queriesExecuted: string[] = [];
   const errors: Array<{ source: string; message: string }> = [];
-  let processedResults = 0;
 
-  // Process queries in order of priority (primary, secondary, fallback)
-  for (const baseQuery of searchQueries) {
-    if (processedResults >= maxResults) {
+  // Limit to first 6 queries to avoid timeouts
+  const limitedQueries = searchQueries.slice(0, 6);
+
+  for (const baseQuery of limitedQueries) {
+    if (discoveredListings.length >= maxResults) {
       logger.info('Maximum results reached, stopping search');
       break;
     }
 
     try {
-      // Generate site-specific queries for this base query
-      const siteQueries = generateSiteSpecificQueries(baseQuery);
+      // Try general search first (more likely to find results)
+      logger.info(`Executing general search: ${baseQuery}`);
       
-      for (const siteQuery of siteQueries) {
-        if (processedResults >= maxResults) break;
+      const generalResults = await executeGoogleSearch(baseQuery, logger);
+      queriesExecuted.push(baseQuery);
+      
+      if (generalResults.length > 0) {
+        const categorizedResults = categorizeAndScoreResults(generalResults, baseQuery, logger);
+        discoveredListings.push(...categorizedResults);
         
-        try {
-          logger.info(`Executing Google search: ${siteQuery}`);
-          
-          const searchResults = await executeGoogleSearch(siteQuery, logger);
-          queriesExecuted.push(siteQuery);
-          
-          // Process and categorize results
-          const categorizedResults = categorizeAndScoreResults(searchResults, baseQuery, logger);
-          discoveredListings.push(...categorizedResults);
-          
-          processedResults += categorizedResults.length;
-          
-          // Rate limiting between searches
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          
-        } catch (error) {
-          logger.error('Site-specific search failed', error, { query: siteQuery });
-          errors.push({
-            source: 'Google Search',
-            message: `Search failed for "${siteQuery}": ${error.message}`
-          });
+        // If we found good results, try one site-specific query
+        if (categorizedResults.length > 0 && discoveredListings.length < maxResults) {
+          const siteQueries = generateSiteSpecificQueries(baseQuery);
+          if (siteQueries.length > 0) {
+            try {
+              const siteResults = await executeGoogleSearch(siteQueries[0], logger);
+              queriesExecuted.push(siteQueries[0]);
+              const moreCategorized = categorizeAndScoreResults(siteResults, baseQuery, logger);
+              discoveredListings.push(...moreCategorized);
+            } catch (siteError) {
+              logger.warn('Site-specific search failed', { error: siteError.message });
+            }
+          }
         }
       }
       
+      // Rate limiting between searches
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
     } catch (error) {
-      logger.error('Base query processing failed', error, { query: baseQuery });
+      logger.error('Search query failed', error, { query: baseQuery });
       errors.push({
-        source: 'Query Processing',
-        message: `Failed to process query "${baseQuery}": ${error.message}`
+        source: 'Google Search',
+        message: `Search failed for "${baseQuery}": ${error.message}`
       });
     }
   }
 
-  // Remove duplicates based on URL
+  // Remove duplicates and sort
   const uniqueListings = deduplicateListings(discoveredListings, logger);
-  
-  // Sort by confidence and source preference
   const sortedListings = sortListingsByRelevance(uniqueListings);
 
-  logger.info('Google Search discovery completed', {
+  logger.info('Optimized Google Search discovery completed', {
     operation: 'discoverListingsViaGoogle',
     totalDiscovered: sortedListings.length,
     queriesExecuted: queriesExecuted.length,
@@ -130,17 +128,11 @@ async function executeGoogleSearch(
   searchUrl.searchParams.set('q', searchQuery);
   searchUrl.searchParams.set('num', '10');
   searchUrl.searchParams.set('safe', 'active');
-  searchUrl.searchParams.set('dateRestrict', 'm12'); // Last 12 months for relevancy
-
-  logger.info('Executing Google Custom Search', {
-    operation: 'executeGoogleSearch',
-    query: searchQuery
-  });
 
   try {
     const response = await withTimeout(
       fetch(searchUrl.toString()),
-      config.timeout.search,
+      10000, // 10 second timeout
       'Google Search API'
     );
 
@@ -186,7 +178,6 @@ function categorizeAndScoreResults(
 
   for (const result of searchResults) {
     try {
-      // Determine source based on URL
       let source: 'ebay' | '130point' | 'pwcc' | 'other' = 'other';
       
       if (result.link.includes('ebay.com')) {
@@ -202,11 +193,10 @@ function categorizeAndScoreResults(
         continue;
       }
 
-      // Calculate confidence based on relevance
       const confidence = calculateListingConfidence(result, originalQuery);
       
-      // Only include listings with reasonable confidence
-      if (confidence >= 0.3) {
+      // Lower threshold for acceptance
+      if (confidence >= 0.2) {
         listings.push({
           url: result.link,
           title: result.title,
@@ -225,7 +215,7 @@ function categorizeAndScoreResults(
 }
 
 function calculateListingConfidence(result: GoogleSearchResult, originalQuery: string): number {
-  let confidence = 0.5; // Base confidence
+  let confidence = 0.3; // Base confidence
 
   const title = result.title.toLowerCase();
   const snippet = result.snippet.toLowerCase();
@@ -233,25 +223,25 @@ function calculateListingConfidence(result: GoogleSearchResult, originalQuery: s
 
   // Check for query terms in title (higher weight)
   const titleMatches = queryTerms.filter(term => title.includes(term));
-  confidence += (titleMatches.length / queryTerms.length) * 0.3;
+  confidence += (titleMatches.length / queryTerms.length) * 0.4;
 
   // Check for query terms in snippet
   const snippetMatches = queryTerms.filter(term => snippet.includes(term));
-  confidence += (snippetMatches.length / queryTerms.length) * 0.1;
+  confidence += (snippetMatches.length / queryTerms.length) * 0.2;
 
   // Bonus for sold indicators
   if (title.includes('sold') || snippet.includes('sold')) {
-    confidence += 0.1;
+    confidence += 0.15;
   }
 
   // Bonus for price indicators
   if (title.includes('$') || snippet.includes('$')) {
-    confidence += 0.05;
+    confidence += 0.1;
   }
 
   // Bonus for rookie/RC indicators
   if (title.includes('rookie') || title.includes(' rc ') || snippet.includes('rookie')) {
-    confidence += 0.05;
+    confidence += 0.1;
   }
 
   return Math.min(1.0, confidence);
@@ -285,7 +275,7 @@ function sortListingsByRelevance(listings: DiscoveredListing[]): DiscoveredListi
       return b.confidence - a.confidence;
     }
     
-    // Then by source preference (eBay and 130Point preferred)
+    // Then by source preference
     const sourcePreference: { [key: string]: number } = {
       ebay: 3,
       '130point': 2,

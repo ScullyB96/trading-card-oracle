@@ -10,7 +10,7 @@ export interface SearchQuerySet {
 }
 
 export function generateSearchQueries(keywords: ExtractedCardKeywords, logger: Logger): SearchQuerySet {
-  logger.info('Generating intelligent search query permutations', {
+  logger.info('Generating optimized search queries', {
     operation: 'generateSearchQueries',
     player: keywords.player,
     year: keywords.year,
@@ -39,114 +39,54 @@ export function generateSearchQueries(keywords: ExtractedCardKeywords, logger: L
     return { primaryQueries: [], secondaryQueries: [], fallbackQueries: [], allQueries: [] };
   }
 
-  // PRIMARY QUERIES - Most specific, highest priority
-  if (year !== 'unknown' && set !== 'unknown' && cardNumber !== 'unknown') {
-    // Ultra-specific with all details
-    primaryQueries.push(`${year} ${set} ${player} #${cardNumber}`);
-    
-    if (parallels.length > 0) {
-      parallels.forEach(parallel => {
-        primaryQueries.push(`${year} ${set} ${player} ${parallel} #${cardNumber}`);
-      });
-    }
-    
-    if (specialAttributes.includes('RC') || specialAttributes.includes('Rookie')) {
-      primaryQueries.push(`${year} ${set} ${player} RC #${cardNumber}`);
-      primaryQueries.push(`${year} ${set} ${player} Rookie #${cardNumber}`);
-    }
-  }
-
+  // PRIMARY QUERIES - Simplified and more likely to find results
   if (year !== 'unknown' && set !== 'unknown') {
-    // High specificity without card number
-    primaryQueries.push(`${year} ${set} ${player} Rookie`);
-    primaryQueries.push(`${year} ${set} ${player} RC`);
-    
-    if (parallels.length > 0) {
-      parallels.forEach(parallel => {
-        primaryQueries.push(`${year} ${set} ${player} ${parallel}`);
-      });
-    }
-    
-    if (team) {
-      primaryQueries.push(`${year} ${set} ${player} ${team}`);
-    }
-  }
-
-  // SECONDARY QUERIES - Good specificity, medium priority
-  if (year !== 'unknown') {
-    secondaryQueries.push(`${player} ${year} Rookie Card`);
-    secondaryQueries.push(`${player} ${year} RC`);
-    
-    if (sport !== 'unknown') {
-      secondaryQueries.push(`${player} ${year} ${sport} Rookie`);
-    }
-    
-    if (team) {
-      secondaryQueries.push(`${player} ${year} ${team} Rookie`);
-    }
-    
-    // Include popular sets dynamically
-    const popularSets = getPopularSetsForSport(sport);
-    popularSets.forEach(popularSet => {
-      secondaryQueries.push(`${player} ${year} ${popularSet} RC`);
-    });
-  }
-
-  if (set !== 'unknown') {
-    secondaryQueries.push(`${player} ${set} Rookie`);
-    secondaryQueries.push(`${player} ${set} RC`);
+    primaryQueries.push(`${player} ${year} ${set} rookie card`);
+    primaryQueries.push(`${player} ${year} ${set} RC`);
     
     if (cardNumber !== 'unknown') {
-      secondaryQueries.push(`${player} ${set} #${cardNumber}`);
+      primaryQueries.push(`${player} ${year} ${set} #${cardNumber}`);
     }
   }
 
-  // Add parallel-specific queries
+  if (year !== 'unknown') {
+    primaryQueries.push(`${player} ${year} rookie card sold`);
+    primaryQueries.push(`${player} ${year} RC sold`);
+  }
+
+  // Add parallel-specific queries (limited)
   if (parallels.length > 0) {
-    parallels.forEach(parallel => {
-      if (year !== 'unknown') {
-        secondaryQueries.push(`${player} ${year} ${parallel}`);
-      }
-      secondaryQueries.push(`${player} ${parallel} Rookie`);
-    });
-  }
-
-  // Add special attributes queries
-  specialAttributes.forEach(attr => {
+    const topParallel = parallels[0]; // Just use the first parallel
     if (year !== 'unknown') {
-      secondaryQueries.push(`${player} ${year} ${attr}`);
+      primaryQueries.push(`${player} ${year} ${topParallel} card`);
     }
-    secondaryQueries.push(`${player} ${attr}`);
-  });
+  }
 
-  // FALLBACK QUERIES - Broad searches, lowest priority
-  fallbackQueries.push(`${player} Rookie Card`);
-  fallbackQueries.push(`${player} RC`);
-  
+  // SECONDARY QUERIES - Broader searches
+  if (set !== 'unknown') {
+    secondaryQueries.push(`${player} ${set} rookie`);
+  }
+
   if (sport !== 'unknown') {
-    fallbackQueries.push(`${player} ${sport} Rookie`);
+    secondaryQueries.push(`${player} ${sport} rookie card`);
   }
-  
+
   if (team) {
-    fallbackQueries.push(`${player} ${team} Card`);
+    secondaryQueries.push(`${player} ${team} rookie card`);
   }
 
-  // Grade-specific queries if available
-  if (grade) {
-    if (year !== 'unknown' && set !== 'unknown') {
-      primaryQueries.push(`${year} ${set} ${player} ${grade}`);
-    }
-    secondaryQueries.push(`${player} ${grade}`);
-  }
+  // FALLBACK QUERIES - Very broad
+  fallbackQueries.push(`${player} rookie card`);
+  fallbackQueries.push(`${player} RC`);
 
-  // Clean and deduplicate queries
-  const cleanPrimary = cleanAndDeduplicateQueries(primaryQueries);
-  const cleanSecondary = cleanAndDeduplicateQueries(secondaryQueries.filter(q => !cleanPrimary.includes(q)));
-  const cleanFallback = cleanAndDeduplicateQueries(fallbackQueries.filter(q => !cleanPrimary.includes(q) && !cleanSecondary.includes(q)));
+  // Clean and limit queries
+  const cleanPrimary = cleanAndLimitQueries(primaryQueries, 4);
+  const cleanSecondary = cleanAndLimitQueries(secondaryQueries.filter(q => !cleanPrimary.includes(q)), 3);
+  const cleanFallback = cleanAndLimitQueries(fallbackQueries.filter(q => !cleanPrimary.includes(q) && !cleanSecondary.includes(q)), 2);
 
   const allQueries = [...cleanPrimary, ...cleanSecondary, ...cleanFallback];
 
-  logger.info('Query generation complete', {
+  logger.info('Optimized query generation complete', {
     operation: 'generateSearchQueries',
     primaryCount: cleanPrimary.length,
     secondaryCount: cleanSecondary.length,
@@ -162,47 +102,24 @@ export function generateSearchQueries(keywords: ExtractedCardKeywords, logger: L
   };
 }
 
-function getPopularSetsForSport(sport: string): string[] {
-  const setsByProvider: { [key: string]: string[] } = {
-    football: ['Prizm', 'Select', 'Donruss', 'Optic', 'Chronicles', 'Contenders', 'Phoenix', 'Absolute'],
-    basketball: ['Prizm', 'Select', 'Donruss', 'Optic', 'Chronicles', 'Contenders', 'Court Kings', 'Hoops'],
-    baseball: ['Topps', 'Bowman', 'Chrome', 'Prizm', 'Diamond Kings', 'Update', 'Heritage', 'Stadium Club'],
-    unknown: ['Prizm', 'Select', 'Donruss', 'Optic', 'Chronicles', 'Topps', 'Bowman']
-  };
-
-  return setsByProvider[sport] || setsByProvider.unknown;
-}
-
-function cleanAndDeduplicateQueries(queries: string[]): string[] {
+function cleanAndLimitQueries(queries: string[], maxCount: number): string[] {
   return queries
     .map(query => query.trim())
-    .filter(query => query.length >= 10) // Minimum meaningful length
+    .filter(query => query.length >= 8) // Minimum meaningful length
     .filter(query => !query.includes('unknown'))
     .filter((query, index, self) => self.indexOf(query) === index) // Deduplicate
-    .slice(0, 12); // Reasonable limit per category
+    .slice(0, maxCount); // Strict limit
 }
 
-export function generateSiteSpecificQueries(baseQuery: string, targetSites: string[] = ['ebay.com', '130point.com', 'pwcc.market']): string[] {
+export function generateSiteSpecificQueries(baseQuery: string, targetSites: string[] = ['ebay.com', '130point.com']): string[] {
   const siteQueries: string[] = [];
   
+  // Simplified site queries - remove exact quotes that are too restrictive
   targetSites.forEach(site => {
-    // For eBay, target sold listings specifically
     if (site.includes('ebay')) {
-      siteQueries.push(`"${baseQuery}" sold site:ebay.com/itm/`);
-      siteQueries.push(`"${baseQuery}" site:ebay.com/itm/ "sold"`);
-    }
-    // For 130Point, target their sales pages
-    else if (site.includes('130point')) {
-      siteQueries.push(`"${baseQuery}" site:130point.com/sales/`);
-      siteQueries.push(`"${baseQuery}" site:130point.com "sold"`);
-    }
-    // For PWCC, target their vault
-    else if (site.includes('pwcc')) {
-      siteQueries.push(`"${baseQuery}" site:pwcc.market/vault/`);
-    }
-    // Generic site search
-    else {
-      siteQueries.push(`"${baseQuery}" site:${site}`);
+      siteQueries.push(`${baseQuery} sold site:ebay.com`);
+    } else if (site.includes('130point')) {
+      siteQueries.push(`${baseQuery} site:130point.com`);
     }
   });
   
